@@ -28,8 +28,9 @@ export default async function handler(req, res) {
 
     // 4) Payload limpio
     const payload = {
-      inputs: [{ data: { image: { base64: b64 } } }],
-      model: { output_info: { output_config: { max_concepts: 32, min_value: 0.5 } } }
+  user_app_id: { user_id: "clarifai", app_id: "main" },
+  inputs: [{ data: { image: { base64: b64 } } }],
+  model: { output_info: { output_config: { max_concepts: 32, min_value: 0.5 } } }
     };
 
     const r = await fetch("https://api.clarifai.com/v2/models/food-item-recognition/outputs", {
