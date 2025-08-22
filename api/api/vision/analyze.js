@@ -16,24 +16,14 @@ export default async function handler(req, res) {
 
     const payload = {
       inputs: [{ data: { image: { base64 } } }],
-      model: {
-        output_info: {
-          output_config: { max_concepts: 32, min_value: 0.5 }
-        }
-      }
+      model: { output_info: { output_config: { max_concepts: 32, min_value: 0.5 } } }
     };
 
-    const r = await fetch(
-      "https://api.clarifai.com/v2/models/food-item-recognition/outputs",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Key ${key}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      }
-    );
+    const r = await fetch("https://api.clarifai.com/v2/models/food-item-recognition/outputs", {
+      method: "POST",
+      headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
 
     const j = await r.json();
     if (!r.ok) {
@@ -42,39 +32,14 @@ export default async function handler(req, res) {
       });
     }
 
-    // Traducciones comunes ES->EN
     const es2en = {
-      arroz: "rice",
-      pollo: "chicken",
-      res: "beef",
-      carne: "beef",
-      cerdo: "pork",
-      pescado: "fish",
-      huevo: "egg",
-      huevos: "egg",
-      papa: "potato",
-      papas: "potato",
-      queso: "cheese",
-      pan: "bread",
-      pasta: "pasta",
-      ensalada: "salad",
-      tomate: "tomato",
-      lechuga: "lettuce",
-      cebolla: "onion",
-      maiz: "corn",
-      arepa: "arepa",
-      frijoles: "beans",
-      caraotas: "beans",
-      lentejas: "lentils",
-      avena: "oats",
-      yuca: "cassava",
-      plátano: "plantain",
-      platano: "plantain",
-      batata: "sweet potato",
-      camote: "sweet potato",
-      aguacate: "avocado"
+      arroz: "rice", pollo: "chicken", res: "beef", carne: "beef", cerdo: "pork", pescado: "fish",
+      huevo: "egg", huevos: "egg", papa: "potato", papas: "potato", queso: "cheese", pan: "bread",
+      pasta: "pasta", ensalada: "salad", tomate: "tomato", lechuga: "lettuce", cebolla: "onion",
+      maiz: "corn", arepa: "arepa", frijoles: "beans", caraotas: "beans", lentejas: "lentils",
+      avena: "oats", yuca: "cassava", "plátano": "plantain", platano: "plantain",
+      batata: "sweet potato", camote: "sweet potato", aguacate: "avocado"
     };
-
     const norm = (s) => {
       const x = (s || "").toLowerCase().trim();
       return es2en[x] || (x.endsWith("s") ? x.slice(0, -1) : x);
@@ -84,15 +49,10 @@ export default async function handler(req, res) {
       .filter((c) => c.value >= 0.85)
       .sort((a, b) => b.value - a.value)
       .slice(0, 8)
-      .map((c) => ({
-        name: norm(c.name),
-        confidence: Number(c.value.toFixed(3))
-      }));
+      .map((c) => ({ name: norm(c.name), confidence: Number(c.value.toFixed(3)) }));
 
     return res.status(200).json({ concepts });
   } catch (e) {
-    return res.status(502).json({
-      error: { code: "SERVER_ERROR", message: String(e).slice(0, 500) }
-    });
+    return res.status(502).json({ error: { code: "SERVER_ERROR", message: String(e).slice(0, 500) } });
   }
 }
