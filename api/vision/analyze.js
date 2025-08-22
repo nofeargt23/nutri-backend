@@ -53,28 +53,87 @@ export default async function handler(req, res) {
       return res.status(502).json({ error: { code: "CLARIFAI_FAIL", message: JSON.stringify(j).slice(0, 800) } });
     }
 
-    // Extraer SIEMPRE top conceptos (sin filtro)
-    const rawConcepts = j?.outputs?.[0]?.data?.concepts || [];
-    const top = rawConcepts
-      .slice()                           // copia
-      .sort((a,b) => (b.value||0) - (a.value||0))
-      .slice(0, 12)
-      .map(c => ({ name: String(c.name||"").toLowerCase(), confidence: Number((c.value||0).toFixed(3)) }));
+    // ========= EXTRAER CONCEPTOS DE TODAS LAS FORMAS POSIBLES =========
+    const out = j?.outputs?.[0] || {};
+    const data = out?.data || {};
 
-    // Si vino vacío, devolvemos también debug con lo que llegó
-    if (!top.length) {
+    // 1) planos
+    const flat = Array.isArray(data.concepts) ? data.concepts : [];
+
+    // 2) regions[*].data.concepts
+    let fromRegions = [];
+    if (Array.isArray(data.regions)) {
+      for (const r of data.regions) {
+        const cc = r?.data?.concepts;
+        if (Array.isArray(cc)) fromRegions.push(...cc);
+      }
+    }
+
+    // 3) frames[*].data.concepts
+    let fromFrames = [];
+    if (Array.isArray(data.frames)) {
+      for (const f of data.frames) {
+        const cc = f?.data?.concepts;
+        if (Array.isArray(cc)) fromFrames.push(...cc);
+      }
+    }
+
+    // Unir todo
+    const allConcepts = [...flat, ...fromRegions, ...fromFrames]
+      .map(c => ({
+        name: String(c?.name || "").toLowerCase(),
+        value: Number(c?.value || 0)
+      }))
+      .filter(c => c.name);
+
+    // Agrupar por nombre (promedio y pico)
+    const byName = new Map();
+    for (const c of allConcepts) {
+      const prev = byName.get(c.name);
+      if (!prev) byName.set(c.name, { name: c.name, sum: c.value, n: 1, max: c.value });
+      else { prev.sum += c.value; prev.n += 1; prev.max = Math.max(prev.max, c.value); }
+    }
+
+    let combined = [...byName.values()].map(x => ({
+      name: x.name,
+      confidence: Number((x.sum / x.n).toFixed(3)), // promedio
+      peak: Number(x.max.toFixed(3))                // mejor score
+    }));
+
+    // Ordenar por pico y promedio
+    combined.sort((a, b) => (b.peak - a.peak) || (b.confidence - a.confidence));
+
+    // Diccionario simple ES->EN
+    const es2en = {
+      arroz:"rice", pollo:"chicken", res:"beef", carne:"beef", cerdo:"pork", pescado:"fish",
+      huevo:"egg", huevos:"egg", papa:"potato", papas:"potato", queso:"cheese", pan:"bread",
+      pasta:"pasta", ensalada:"salad", tomate:"tomato", lechuga:"lettuce", cebolla:"onion",
+      maiz:"corn", arepa:"arepa", frijoles:"beans", caraotas:"beans", lentejas:"lentils",
+      avena:"oats", yuca:"cassava", "plátano":"plantain", platano:"plantain",
+      batata:"sweet potato", camote:"sweet potato", aguacate:"avocado"
+    };
+    const norm = s => es2en[s] || (s.endsWith("s") ? s.slice(0,-1) : s);
+
+    const concepts = combined.slice(0, 12).map(c => ({
+      name: norm(c.name),
+      confidence: c.confidence,
+      peak: c.peak
+    }));
+
+    // Si sigue vacío, entregar debug con contadores claros
+    if (!concepts.length) {
       return res.status(200).json({
         concepts: [],
         debug: {
-          status: j?.status || null,
           hasOutputs: !!j?.outputs?.length,
-          rawFirstOutputKeys: j?.outputs?.[0] ? Object.keys(j.outputs[0]) : null,
-          rawDataKeys: j?.outputs?.[0]?.data ? Object.keys(j.outputs[0].data) : null
+          flatConceptsCount: flat.length,
+          regionsCount: Array.isArray(data.regions) ? data.regions.length : 0,
+          framesCount: Array.isArray(data.frames) ? data.frames.length : 0
         }
       });
     }
 
-    return res.status(200).json({ concepts: top });
+    return res.status(200).json({ concepts });
   } catch (e) {
     return res.status(502).json({ error: { code: "SERVER_ERROR", message: String(e).slice(0, 800) } });
   }
