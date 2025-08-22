@@ -4,7 +4,7 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: { code: "METHOD_NOT_ALLOWED" } });
     }
 
-    // 1) Asegurar que el body sea objeto (Vercel a veces entrega string)
+    // 1) Asegurar que el body sea objeto
     const rawBody = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     let b64 = String(rawBody.base64 || "");
 
@@ -12,7 +12,7 @@ export default async function handler(req, res) {
     b64 = b64.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, ""); // data:image/...;base64,
     b64 = b64.replace(/\s+/g, ""); // quitar \n, \r, espacios
 
-    // 3) Relleno de padding (=) si falta
+    // 3) Padding si falta
     const mod = b64.length % 4;
     if (mod === 2) b64 += "==";
     else if (mod === 3) b64 += "=";
@@ -26,24 +26,35 @@ export default async function handler(req, res) {
       return res.status(501).json({ error: { code: "NO_KEY", message: "Missing Clarifai key" } });
     }
 
-    // 4) Payload limpio
+    // 4) Payload con user_app_id requerido por Clarifai
     const payload = {
-  user_app_id: { user_id: "clarifai", app_id: "main" },
-  inputs: [{ data: { image: { base64: b64 } } }],
-  model: { output_info: { output_config: { max_concepts: 32, min_value: 0.5 } } }
+      user_app_id: { user_id: "clarifai", app_id: "main" },
+      inputs: [{ data: { image: { base64: b64 } } }],
+      model: { output_info: { output_config: { max_concepts: 32, min_value: 0.5 } } }
     };
 
-    const r = await fetch("https://api.clarifai.com/v2/models/food-item-recognition/outputs", {
-      method: "POST",
-      headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+    // Helpers para llamar modelos
+    const endpoint = (modelId) => `https://api.clarifai.com/v2/models/${modelId}/outputs`;
+    async function callClarifai(modelId) {
+      const r = await fetch(endpoint(modelId), {
+        method: "POST",
+        headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const j = await r.json();
+      return { ok: r.ok, json: j };
+    }
 
-    const j = await r.json();
-    if (!r.ok) {
+    // 5) Intento 1: modelo de comida; si falla, fallback a modelo general
+    let resp = await callClarifai("food-item-recognition");
+    if (!resp.ok) resp = await callClarifai("general-image-recognition");
+
+    const j = resp.json;
+    if (!resp.ok) {
       return res.status(502).json({ error: { code: "CLARIFAI_FAIL", message: JSON.stringify(j).slice(0, 800) } });
     }
 
+    // 6) Normalización de conceptos
     const es2en = {
       arroz: "rice", pollo: "chicken", res: "beef", carne: "beef", cerdo: "pork", pescado: "fish",
       huevo: "egg", huevos: "egg", papa: "potato", papas: "potato", queso: "cheese", pan: "bread",
@@ -68,3 +79,4 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: { code: "SERVER_ERROR", message: String(e).slice(0, 800) } });
   }
 }
+
