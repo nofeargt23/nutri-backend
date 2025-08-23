@@ -36,12 +36,10 @@ export default async function handler(req, res) {
       return [...seen.values()].sort((a,b)=>b.confidence-a.confidence).slice(0, topN);
     };
 
-    // ===== Try 1 & 2: Spoonacular analyze / classify =====
+    // ===== Try Spoonacular =====
     const KEY = process.env.SPOONACULAR_API_KEY || "";
-    const hasSpoon = Boolean(KEY);
-    let spoonConcepts = [];
-
-    if (hasSpoon && url) {
+    let concepts = [];
+    if (KEY && url) {
       const mkUrl = (path, params={}) => {
         const u = new URL(`https://api.spoonacular.com${path}`);
         u.searchParams.set("apiKey", KEY);
@@ -54,102 +52,99 @@ export default async function handler(req, res) {
         return { ok: r.ok && j?.status !== "failure", j };
       }
 
-      // 1) analyze
+      // analyze → classify fallback
       let resp = await call("/food/images/analyze", { imageUrl: url });
-      // 2) fallback classify si falla
       if (!resp.ok) resp = await call("/food/images/classify", { imageUrl: url });
-
       if (resp.ok) {
         const j = resp.j;
-        // analyze: category + annotations
+        let spoonConcepts = [];
         if (j?.category?.name) {
-          spoonConcepts.push({
-            name: j.category.name,
-            confidence: Number((j.category.probability || 0).toFixed(3))
-          });
+          spoonConcepts.push({ name: j.category.name, confidence: j.category.probability || 0 });
         }
         if (Array.isArray(j?.annotations)) {
           for (const a of j.annotations) {
-            if (a?.label) spoonConcepts.push({ name: a.label, confidence: Number((a.confidence||0).toFixed(3)) });
+            if (a?.label) spoonConcepts.push({ name: a.label, confidence: a.confidence || 0 });
           }
         }
-        // classify: array con category
         if (Array.isArray(j) && j[0]?.category) {
           const c = j[0].category;
-          spoonConcepts.push({
-            name: c.name || c.label || "",
-            confidence: Number(((c.probability ?? c.prob) || 0).toFixed(3))
-          });
+          spoonConcepts.push({ name: c.name || c.label || "", confidence: c.probability || c.prob || 0 });
         }
+        concepts = uniqTop(spoonConcepts);
       }
     }
 
-    let concepts = uniqTop(spoonConcepts);
-
-    // ===== Try 3: Clarifai (solo si spoon quedó vacío) =====
+    // ===== Try Clarifai fallback si Spoonacular falló =====
     if (concepts.length === 0) {
       const key = process.env.CLARIFAI_API_KEY || "";
-      if (!key) {
-        // sin Clarifai, devolvemos lo que haya de Spoon (vacío) para no falsear
-        return res.status(200).json({ concepts: [] });
-      }
-
-      // preparar imagen: url preferente / base64 limpio
-      let imageData = {};
-      if (url) {
-        imageData = { url };
-      } else {
-        let b64 = base64
-          .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "")
-          .replace(/\s+/g, "");
-        const mod = b64.length % 4;
-        if (mod === 2) b64 += "==";
-        else if (mod === 3) b64 += "=";
-        if (!b64) return res.status(400).json({ error: { code: "BAD_REQUEST", message: "Provide url or base64" } });
-        imageData = { base64: b64 };
-      }
-
-      const payload = {
-        user_app_id: { user_id: "clarifai", app_id: "main" },
-        inputs: [{ data: { image: imageData } }],
-        model: { output_info: { output_config: { max_concepts: 64, min_value: 0.0 } } }
-      };
-
-      const endpoint = (id) => `https://api.clarifai.com/v2/models/${id}/outputs`;
-      async function callClarifai(id) {
-        const r = await fetch(endpoint(id), {
-          method: "POST",
-          headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const j = await r.json();
-        return { ok: r.ok, j };
-      }
-
-      // usar modelo general (el de comida está inestable)
-      let resp = await callClarifai("general-image-recognition");
-      if (resp.ok) {
-        const j = resp.j;
-        const out = j?.outputs?.[0] || {};
-        const data = out?.data || {};
-        const flat = Array.isArray(data.concepts) ? data.concepts : [];
-        let fromRegions = [];
-        if (Array.isArray(data.regions)) {
-          for (const r of data.regions) {
-            const cc = r?.data?.concepts;
-            if (Array.isArray(cc)) fromRegions.push(...cc);
-          }
+      if (key) {
+        let imageData = {};
+        if (url) {
+          imageData = { url };
+        } else {
+          let b64 = base64
+            .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "")
+            .replace(/\s+/g, "");
+          const mod = b64.length % 4;
+          if (mod === 2) b64 += "==";
+          else if (mod === 3) b64 += "=";
+          imageData = { base64: b64 };
         }
-        let fromFrames = [];
-        if (Array.isArray(data.frames)) {
-          for (const f of data.frames) {
-            const cc = f?.data?.concepts;
-            if (Array.isArray(cc)) fromFrames.push(...cc);
-          }
+
+        const payload = {
+          user_app_id: { user_id: "clarifai", app_id: "main" },
+          inputs: [{ data: { image: imageData } }],
+          model: { output_info: { output_config: { max_concepts: 64, min_value: 0.0 } } }
+        };
+
+        const endpoint = id => `https://api.clarifai.com/v2/models/${id}/outputs`;
+        async function callClarifai(id) {
+          const r = await fetch(endpoint(id), {
+            method: "POST",
+            headers: { Authorization: `Key ${key}`, "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const j = await r.json();
+          return { ok: r.ok, j };
         }
-        concepts = uniqTop([...flat, ...fromRegions, ...fromFrames]);
+
+        let resp = await callClarifai("general-image-recognition");
+        if (resp.ok) {
+          const j = resp.j;
+          const out = j?.outputs?.[0] || {};
+          const data = out?.data || {};
+          const flat = Array.isArray(data.concepts) ? data.concepts : [];
+          let fromRegions = [];
+          if (Array.isArray(data.regions)) {
+            for (const r of data.regions) {
+              const cc = r?.data?.concepts;
+              if (Array.isArray(cc)) fromRegions.push(...cc);
+            }
+          }
+          let fromFrames = [];
+          if (Array.isArray(data.frames)) {
+            for (const f of data.frames) {
+              const cc = f?.data?.concepts;
+              if (Array.isArray(cc)) fromFrames.push(...cc);
+            }
+          }
+          concepts = uniqTop([...flat, ...fromRegions, ...fromFrames]);
+        }
       }
     }
+
+    // ===== Vocabulario de cocina =====
+    const vocab = new Set([
+      "chicken","rice","beef","pork","fish","egg","cheese","bread","pasta","salad",
+      "tomato","lettuce","onion","corn","beans","lentils","potato","plantain","avocado",
+      "arepa","cassava","oats","sweet potato","yuca","pepper","carrot","broccoli"
+    ]);
+
+    let filtered = concepts.filter(c => vocab.has(c.name));
+    if (filtered.length === 0) {
+      filtered = concepts.slice(0,3); // fallback: al menos top-3
+    }
+    concepts = filtered;
 
     return res.status(200).json({ concepts });
   } catch (e) {
