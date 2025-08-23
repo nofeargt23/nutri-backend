@@ -1,4 +1,4 @@
-// api/analyze-then-parse.js (DEBUG)
+// api/analyze-then-parse.js (DEBUG + base fijo)
 async function readMaybeJson(resp) {
   const ct = resp.headers.get("content-type") || "";
   const text = await resp.text();
@@ -35,8 +35,10 @@ export default async function handler(req, res) {
     const { url } = req.body || {};
     if (!url) return res.status(400).json({ error: "BAD_REQUEST", message: "url required" });
 
-    const baseHost = process.env.VERCEL_URL || req.headers.host || "";
-    const base = baseHost.startsWith("http") ? baseHost : `https://${baseHost}`;
+    // <<<<<< FORZAR BASE ESTABLE >>>>>>
+    const explicit = process.env.PUBLIC_BASE_URL; // p.ej. https://nutri-backend-chi.vercel.app
+    const base = explicit || `https://${req.headers.host}`;
+
     const headers = {
       "Content-Type": "application/json",
       "x-api-key": provided || ""
@@ -47,10 +49,10 @@ export default async function handler(req, res) {
     const vResp = await fetch(vUrl, { method: "POST", headers, body: JSON.stringify({ url }) });
     const vData = await readMaybeJson(vResp);
 
-    // 2) Nutrition (solo si vision tiene conceptos)
-    let nUrl = `${base}/api/nutrition/parse`;
-    let nData = null;
+    // 2) Nutrition (solo si visión trajo conceptos)
+    let nData = null, nUrl = null;
     if (vData.ok && Array.isArray(vData.json?.concepts) && vData.json.concepts.length) {
+      nUrl = `${base}/api/nutrition/parse`;
       const ingredients = vData.json.concepts.map(c => c.name);
       const nResp = await fetch(nUrl, { method: "POST", headers, body: JSON.stringify({ ingredients }) });
       nData = await readMaybeJson(nResp);
