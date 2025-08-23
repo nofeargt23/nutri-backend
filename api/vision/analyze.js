@@ -36,7 +36,7 @@ export default async function handler(req, res) {
       return [...seen.values()].sort((a,b)=>b.confidence-a.confidence).slice(0, topN);
     };
 
-    // ===== Try Spoonacular =====
+    // ===== Try Spoonacular (URL) =====
     const KEY = process.env.SPOONACULAR_API_KEY || "";
     let concepts = [];
     if (KEY && url) {
@@ -74,7 +74,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // ===== Try Clarifai fallback si Spoonacular falló =====
+    // ===== Clarifai fallback si Spoonacular no dio nada =====
     if (concepts.length === 0) {
       const key = process.env.CLARIFAI_API_KEY || "";
       if (key) {
@@ -108,6 +108,7 @@ export default async function handler(req, res) {
           return { ok: r.ok, j };
         }
 
+        // modelo general (más estable)
         let resp = await callClarifai("general-image-recognition");
         if (resp.ok) {
           const j = resp.j;
@@ -133,7 +134,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // ===== Vocabulario de cocina =====
+    // ===== Filtro de vocabulario (ingredientes válidos) =====
     const vocab = new Set([
       "chicken","rice","beef","pork","fish","egg","cheese","bread","pasta","salad",
       "tomato","lettuce","onion","corn","beans","lentils","potato","plantain","avocado",
@@ -141,9 +142,15 @@ export default async function handler(req, res) {
     ]);
 
     let filtered = concepts.filter(c => vocab.has(c.name));
+
+    // si no hay match, devolvemos vacío + nota (en vez de basura tipo "ice_cream")
     if (filtered.length === 0) {
-      filtered = concepts.slice(0,3); // fallback: al menos top-3
+      return res.status(200).json({
+        concepts: [],
+        note: "Ningún ingrediente válido detectado. Intenta otra foto o confirma manualmente."
+      });
     }
+
     concepts = filtered;
 
     return res.status(200).json({ concepts });
