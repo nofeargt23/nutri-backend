@@ -28,10 +28,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "BAD_REQUEST", message: "url required" });
     }
 
-    // Base URL de este backend en Vercel (con https)
+    // Base URL de este backend en Vercel (https + dominio actual)
     const base = `https://${process.env.VERCEL_URL || req.headers.host}`;
 
-    // Headers a propagar
     const headers = {
       "Content-Type": "application/json",
       "x-api-key": provided || ""
