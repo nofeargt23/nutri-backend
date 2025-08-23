@@ -1,4 +1,14 @@
-// api/analyze-then-parse.js
+// api/analyze-then-parse.js (DEBUG)
+async function readMaybeJson(resp) {
+  const ct = resp.headers.get("content-type") || "";
+  const text = await resp.text();
+  if (ct.includes("application/json")) {
+    try { return { ok: true, json: JSON.parse(text), raw: text, ct, status: resp.status }; }
+    catch (e) { return { ok: false, error: "json-parse-failed", raw: text.slice(0, 500), ct, status: resp.status }; }
+  }
+  return { ok: false, error: "non-json", raw: text.slice(0, 500), ct, status: resp.status };
+}
+
 export default async function handler(req, res) {
   // ---- CORS básico ----
   const allowed = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -10,7 +20,6 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  // ---- Método ----
   if (req.method !== "POST") {
     return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
   }
@@ -24,39 +33,44 @@ export default async function handler(req, res) {
 
   try {
     const { url } = req.body || {};
-    if (!url) {
-      return res.status(400).json({ error: "BAD_REQUEST", message: "url required" });
-    }
+    if (!url) return res.status(400).json({ error: "BAD_REQUEST", message: "url required" });
 
-    // Base URL de este backend en Vercel (https + dominio actual)
-    const base = `https://${process.env.VERCEL_URL || req.headers.host}`;
-
+    const baseHost = process.env.VERCEL_URL || req.headers.host || "";
+    const base = baseHost.startsWith("http") ? baseHost : `https://${baseHost}`;
     const headers = {
       "Content-Type": "application/json",
       "x-api-key": provided || ""
     };
 
-    // 1) Analizar imagen
-    const vRes = await fetch(`${base}/api/vision/analyze`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ url })
-    });
-    const vision = await vRes.json();
+    // 1) Vision
+    const vUrl = `${base}/api/vision/analyze`;
+    const vResp = await fetch(vUrl, { method: "POST", headers, body: JSON.stringify({ url }) });
+    const vData = await readMaybeJson(vResp);
 
-    // 2) Si hay conceptos -> parsear nutrición
-    let nutrition = null;
-    if (vision && Array.isArray(vision.concepts) && vision.concepts.length) {
-      const ingredients = vision.concepts.map(c => c.name);
-      const nRes = await fetch(`${base}/api/nutrition/parse`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ ingredients })
-      });
-      nutrition = await nRes.json();
+    // 2) Nutrition (solo si vision tiene conceptos)
+    let nUrl = `${base}/api/nutrition/parse`;
+    let nData = null;
+    if (vData.ok && Array.isArray(vData.json?.concepts) && vData.json.concepts.length) {
+      const ingredients = vData.json.concepts.map(c => c.name);
+      const nResp = await fetch(nUrl, { method: "POST", headers, body: JSON.stringify({ ingredients }) });
+      nData = await readMaybeJson(nResp);
     }
 
-    return res.status(200).json({ vision, nutrition });
+    return res.status(200).json({
+      debug: {
+        base,
+        vUrl, vStatus: vData?.status, vCt: vData?.ct,
+        vOk: vData?.ok, vErr: vData?.error || null,
+        vRaw: vData?.ok ? undefined : vData?.raw
+      },
+      vision: vData?.ok ? vData.json : null,
+      nutritionDebug: nData && {
+        nUrl, nStatus: nData?.status, nCt: nData?.ct,
+        nOk: nData?.ok, nErr: nData?.error || null,
+        nRaw: nData?.ok ? undefined : nData?.raw
+      },
+      nutrition: nData?.ok ? nData.json : null
+    });
   } catch (err) {
     return res.status(500).json({ error: "SERVER_ERROR", message: err?.message || String(err) });
   }
