@@ -1,8 +1,9 @@
 // /api/analyze-then-parse.js
 // Clarifai (workflow) -> filtra conceptos -> mapea a ingredientes -> Nutritionix -> macros
+// Mejora: rescate de proteína débil y flag forceProtein
 
-const MIN_CONF = 0.20;        // umbral base para conservar conceptos
-const MAX_CONCEPTS = 20;      // top-N máximo para evitar ruido
+const MIN_CONF = 0.20;        // umbral base para conservar conceptos "fuertes"
+const MAX_CONCEPTS = 50;      // traemos más para poder rescatar señales débiles
 
 function setCors(req, res) {
   const allowed = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -21,24 +22,30 @@ function baseUrlFrom(req) {
   return `${proto}://${host}`;
 }
 
-// ============== MAPEADOR MEJORADO (reemplazo completo) ==============
-function mapConceptsToIngredients(concepts) {
-  // 1) Normaliza y ordena
-  const norm = concepts
+// ================== MAPEADOR MEJORADO (con rescate) ==================
+function mapConceptsToIngredients(conceptsStrong, allConcepts, opts = {}) {
+  const { forceProtein = false } = opts;
+
+  // normaliza
+  const normStrong = conceptsStrong
     .map(c => ({ name: (c.name || "").toLowerCase().trim(), confidence: c.confidence || 0 }))
     .filter(c => c.name)
     .sort((a,b) => b.confidence - a.confidence);
 
-  // 2) Listas base
+  const normAll = (allConcepts || [])
+    .map(c => ({ name: (c.name || "").toLowerCase().trim(), confidence: c.confidence || 0 }))
+    .filter(c => c.name)
+    .sort((a,b) => b.confidence - a.confidence);
+
   const GRAINS   = new Set(["rice","white rice","brown rice","quinoa","couscous","oatmeal","pilaf","risotto","pasta","noodles"]);
   const PROTEINS = new Set(["chicken","beef","pork","turkey","lamb","bacon","meat","fish","salmon","tuna","shrimp","egg","eggs"]);
   const VEGS     = new Set(["tomato","onion","garlic","pepper","bell pepper","lettuce","spinach","carrot","corn","cauliflower","broccoli","cabbage","mushroom","zucchini","beans","lentils","chickpea","pea","potato"]);
   const DAIRY    = new Set(["cheese","mozzarella","parmesan","blue cheese","yogurt","butter"]);
   const DISH     = new Set(["pizza","burger","sandwich","soup","stew","porridge"]);
 
-  // 3) Umbrales diferenciados (más permisivo en proteínas)
+  // umbrales fuertes
   const TH_GRAIN = 0.15;
-  const TH_PROT  = 0.08;  // rescata proteína con señal leve
+  const TH_PROT  = 0.08;  // rescata proteína con señal leve en lista fuerte
   const TH_VEG   = 0.12;
   const TH_DAIRY = 0.12;
   const TH_DISH  = 0.20;
@@ -46,10 +53,9 @@ function mapConceptsToIngredients(concepts) {
   const keep = [];
   let hasGrain = false, hasProtein = false;
 
-  for (const c of norm) {
-    const n = c.name;
-    const v = c.confidence;
-
+  // 1) usa la lista fuerte primero
+  for (const c of normStrong) {
+    const n = c.name, v = c.confidence;
     if (DISH.has(n) && v >= TH_DISH) { keep.push(n); continue; }
     if (GRAINS.has(n) && v >= TH_GRAIN) { keep.push(n); hasGrain = true; continue; }
     if (PROTEINS.has(n) && v >= TH_PROT) {
@@ -57,27 +63,32 @@ function mapConceptsToIngredients(concepts) {
       hasProtein = true;
       continue;
     }
-    if (VEGS.has(n) && v >= TH_VEG)   { keep.push(n); continue; }
+    if (VEGS.has(n) && v >= TH_VEG) { keep.push(n); continue; }
     if (DAIRY.has(n) && v >= TH_DAIRY) { keep.push(n); continue; }
   }
 
-  // 4) Co-ocurrencia: si hay grano pero sin proteína, intenta rescatar una proteína débil (>= 0.05)
-  if (hasGrain && !hasProtein) {
-    const weakProt = norm.find(c => PROTEINS.has(c.name) && c.confidence >= 0.05);
+  // 2) rescate por co-ocurrencia: si hay grano pero sin proteína, intenta desde "all" con umbral super bajo
+  if ((hasGrain || forceProtein) && !hasProtein) {
+    const weakProt = normAll.find(c => PROTEINS.has(c.name) && c.confidence >= 0.03);
     if (weakProt) {
       keep.push(weakProt.name === "meat" ? "beef" : weakProt.name);
+      hasProtein = true;
+    } else if (forceProtein) {
+      // si no hay señal pero el cliente lo pide, fuerza una proteína por defecto
+      keep.push("chicken");
       hasProtein = true;
     }
   }
 
-  // 5) Cantidades por defecto y normalización simple
+  // 3) cantidades por defecto y normalización simple
   const result = [];
   const seen = new Set();
-  for (const n of keep) {
+  for (const n0 of keep) {
+    const n = n0.toLowerCase();
     if (seen.has(n)) continue; seen.add(n);
 
     if (PROTEINS.has(n)) {
-      result.push(`150 g ${n}`);
+      result.push(`150 g ${n === "meat" ? "beef" : n}`);
     } else if (GRAINS.has(n)) {
       result.push(n.includes("rice") ? "1 cup rice" : `1 cup ${n}`);
     } else if (["cheese","mozzarella","parmesan","blue cheese"].includes(n)) {
@@ -124,14 +135,22 @@ async function callClarifaiWorkflow({ url, base64 }) {
   const out = json.results?.[0]?.outputs?.[0];
   const conceptsRaw = out?.data?.concepts || [];
 
-  const concepts = conceptsRaw
+  // lista "fuerte"
+  const strong = conceptsRaw
     .map(c => ({ name: c.name || c.id, confidence: c.value }))
     .filter(c => typeof c.confidence === "number")
     .sort((a,b) => b.confidence - a.confidence)
     .slice(0, MAX_CONCEPTS)
     .filter(c => c.confidence >= MIN_CONF);
 
-  return { concepts, raw: { status: json.status, outStatus: out?.status } };
+  // lista "all" sin filtrar por MIN_CONF (solo top MAX_CONCEPTS)
+  const all = conceptsRaw
+    .map(c => ({ name: c.name || c.id, confidence: c.value }))
+    .filter(c => typeof c.confidence === "number")
+    .sort((a,b) => b.confidence - a.confidence)
+    .slice(0, MAX_CONCEPTS);
+
+  return { strong, all, raw: { status: json.status, outStatus: out?.status } };
 }
 
 async function callNutritionixInternal(req, ingredients) {
@@ -162,19 +181,21 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { url, base64, hint, ingredients } = req.body || {};
+    const { url, base64, hint, ingredients, forceProtein } = req.body || {};
     if (!url && !base64 && !hint && !ingredients) {
       return res.status(400).json({ error: "BAD_REQUEST", message: "Send 'url' or 'base64' (or 'hint'/'ingredients')." });
     }
 
     // 1) Clarifai (si hay imagen)
     let concepts = [];
+    let allConcepts = [];
     let vision = null;
     if (url || base64) {
       try {
         const v = await callClarifaiWorkflow({ url, base64 });
-        vision = { ok: true, status: v.raw.status, outStatus: v.raw.outStatus, count: v.concepts.length };
-        concepts = v.concepts;
+        vision = { ok: true, status: v.raw.status, outStatus: v.raw.outStatus, countStrong: v.strong.length, countAll: v.all.length };
+        concepts = v.strong;
+        allConcepts = v.all;
       } catch (e) {
         vision = { ok: false, error: String(e.message || e) };
       }
@@ -184,8 +205,8 @@ export default async function handler(req, res) {
 
     // 2) Lista candidata de ingredientes
     let ingList = Array.isArray(ingredients) ? ingredients.filter(Boolean) : [];
-    if (ingList.length === 0 && concepts.length) {
-      ingList = mapConceptsToIngredients(concepts);
+    if (ingList.length === 0 && (concepts.length || allConcepts.length)) {
+      ingList = mapConceptsToIngredients(concepts, allConcepts, { forceProtein: Boolean(forceProtein) });
     }
     if (ingList.length === 0 && typeof hint === "string" && hint.trim()) {
       ingList = [hint.trim()];
@@ -199,9 +220,10 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-      debug: { minConf: MIN_CONF, mappedIngredients: ingList },
+      debug: { minConf: MIN_CONF, mappedIngredients: ingList, forceProtein: Boolean(forceProtein) },
       vision,
-      concepts,
+      concepts,          // fuertes (≥ MIN_CONF)
+      allConcepts,       // crudos (para debug)
       nutrition
     });
   } catch (err) {
