@@ -1,8 +1,8 @@
 // /api/analyze-then-parse.js
-// 1 llamada: Clarifai (workflow) -> filtra conceptos -> mapea a ingredientes -> Nutritionix -> macros
+// Clarifai (workflow) -> filtra conceptos -> mapea a ingredientes -> Nutritionix -> macros
 
-const MIN_CONF = 0.20;        // umbral de confianza para conceptos
-const MAX_CONCEPTS = 20;      // recorte de top-N para no hacer ruido
+const MIN_CONF = 0.20;        // umbral base para conservar conceptos
+const MAX_CONCEPTS = 20;      // top-N máximo para evitar ruido
 
 function setCors(req, res) {
   const allowed = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
@@ -21,62 +21,77 @@ function baseUrlFrom(req) {
   return `${proto}://${host}`;
 }
 
-// Mapea conceptos de Clarifai a ingredientes (strings) sencillos para Nutritionix
+// ============== MAPEADOR MEJORADO (reemplazo completo) ==============
 function mapConceptsToIngredients(concepts) {
-  const keep = new Set([
-    "rice","brown rice","white rice","pilaf","risotto","quinoa","couscous","oatmeal",
-    "chicken","beef","pork","turkey","lamb","bacon","meat",
-    "fish","salmon","tuna","shrimp",
-    "egg","eggs",
-    "beans","lentils","chickpea","pea",
-    "tomato","onion","garlic","pepper","bell pepper","lettuce","spinach","carrot","corn","cauliflower","broccoli","cabbage","mushroom","zucchini","potato",
-    "cheese","mozzarella","parmesan","blue cheese",
-    "bread","tortilla","pasta","noodles",
-    "oil","olive oil","butter","yogurt",
-    "salt","sugar",
-    "pizza","burger","sandwich","soup","porridge","stew"
-  ]);
+  // 1) Normaliza y ordena
+  const norm = concepts
+    .map(c => ({ name: (c.name || "").toLowerCase().trim(), confidence: c.confidence || 0 }))
+    .filter(c => c.name)
+    .sort((a,b) => b.confidence - a.confidence);
 
-  // normaliza nombres y aplica un mapeo simple
-  const normalize = (s) => s.toLowerCase().trim();
-  const synonyms = new Map([
-    ["meat","beef"],
-    ["eggs","egg"],
-    ["bell pepper","pepper"],
-  ]);
+  // 2) Listas base
+  const GRAINS   = new Set(["rice","white rice","brown rice","quinoa","couscous","oatmeal","pilaf","risotto","pasta","noodles"]);
+  const PROTEINS = new Set(["chicken","beef","pork","turkey","lamb","bacon","meat","fish","salmon","tuna","shrimp","egg","eggs"]);
+  const VEGS     = new Set(["tomato","onion","garlic","pepper","bell pepper","lettuce","spinach","carrot","corn","cauliflower","broccoli","cabbage","mushroom","zucchini","beans","lentils","chickpea","pea","potato"]);
+  const DAIRY    = new Set(["cheese","mozzarella","parmesan","blue cheese","yogurt","butter"]);
+  const DISH     = new Set(["pizza","burger","sandwich","soup","stew","porridge"]);
 
-  const picked = [];
-  for (const c of concepts) {
-    const name = normalize(c.name || "");
-    if (!name) continue;
-    // filtra por allowlist
-    if (!keep.has(name)) continue;
-    // sinónimos
-    const norm = synonyms.get(name) || name;
-    // mete con cantidad default si aplica
-    if (["chicken","beef","pork","turkey","lamb","fish","salmon","tuna","shrimp","bacon"].includes(norm)) {
-      picked.push(`150 g ${norm}`);
-    } else if (["rice","brown rice","white rice","quinoa","couscous","oatmeal","pasta","noodles"].includes(norm)) {
-      picked.push(`1 cup ${norm}`);
-    } else if (["cheese","mozzarella","parmesan","blue cheese","yogurt"].includes(norm)) {
-      picked.push(`30 g ${norm}`);
-    } else if (["bread","tortilla"].includes(norm)) {
-      picked.push(`1 slice ${norm}`);
-    } else if (["pizza","burger","sandwich","soup","stew","porridge"].includes(norm)) {
-      picked.push(norm); // platillos completos, Nutritionix suele entenderlos
-    } else {
-      // verduras/condimentos
-      picked.push(norm);
+  // 3) Umbrales diferenciados (más permisivo en proteínas)
+  const TH_GRAIN = 0.15;
+  const TH_PROT  = 0.08;  // rescata proteína con señal leve
+  const TH_VEG   = 0.12;
+  const TH_DAIRY = 0.12;
+  const TH_DISH  = 0.20;
+
+  const keep = [];
+  let hasGrain = false, hasProtein = false;
+
+  for (const c of norm) {
+    const n = c.name;
+    const v = c.confidence;
+
+    if (DISH.has(n) && v >= TH_DISH) { keep.push(n); continue; }
+    if (GRAINS.has(n) && v >= TH_GRAIN) { keep.push(n); hasGrain = true; continue; }
+    if (PROTEINS.has(n) && v >= TH_PROT) {
+      keep.push(n === "meat" ? "beef" : n);
+      hasProtein = true;
+      continue;
+    }
+    if (VEGS.has(n) && v >= TH_VEG)   { keep.push(n); continue; }
+    if (DAIRY.has(n) && v >= TH_DAIRY) { keep.push(n); continue; }
+  }
+
+  // 4) Co-ocurrencia: si hay grano pero sin proteína, intenta rescatar una proteína débil (>= 0.05)
+  if (hasGrain && !hasProtein) {
+    const weakProt = norm.find(c => PROTEINS.has(c.name) && c.confidence >= 0.05);
+    if (weakProt) {
+      keep.push(weakProt.name === "meat" ? "beef" : weakProt.name);
+      hasProtein = true;
     }
   }
 
-  // dedup conservando orden
+  // 5) Cantidades por defecto y normalización simple
+  const result = [];
   const seen = new Set();
-  const dedup = picked.filter(x => (seen.has(x) ? false : (seen.add(x), true)));
+  for (const n of keep) {
+    if (seen.has(n)) continue; seen.add(n);
 
-  // límite de 6-8 ingredientes para no sobrecargar
-  return dedup.slice(0, 8);
+    if (PROTEINS.has(n)) {
+      result.push(`150 g ${n}`);
+    } else if (GRAINS.has(n)) {
+      result.push(n.includes("rice") ? "1 cup rice" : `1 cup ${n}`);
+    } else if (["cheese","mozzarella","parmesan","blue cheese"].includes(n)) {
+      result.push(`30 g ${n}`);
+    } else if (["bread","tortilla"].includes(n)) {
+      result.push(`1 slice ${n}`);
+    } else {
+      result.push(n);
+    }
+  }
+
+  return result.slice(0, 8);
 }
+// ====================================================================
 
 async function callClarifaiWorkflow({ url, base64 }) {
   const KEY = process.env.CLARIFAI_API_KEY;
@@ -106,10 +121,9 @@ async function callClarifaiWorkflow({ url, base64 }) {
     throw new Error(`Clarifai: ${json.status?.code} ${msg}`);
   }
 
-  // primer output
   const out = json.results?.[0]?.outputs?.[0];
   const conceptsRaw = out?.data?.concepts || [];
-  // normaliza
+
   const concepts = conceptsRaw
     .map(c => ({ name: c.name || c.id, confidence: c.value }))
     .filter(c => typeof c.confidence === "number")
@@ -123,7 +137,6 @@ async function callClarifaiWorkflow({ url, base64 }) {
 async function callNutritionixInternal(req, ingredients) {
   const base = baseUrlFrom(req);
   const headers = { "Content-Type": "application/json" };
-  // si proteges tus endpoints internos con x-api-key, reenvíalo
   const k = req.headers["x-api-key"];
   if (k) headers["x-api-key"] = k;
 
@@ -141,7 +154,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
-  // auth opcional
+  // auth opcional (requiere x-api-key si está configurada)
   const expected = process.env.BACKEND_API_KEY || "";
   const provided = req.headers["x-api-key"];
   if (expected && provided !== expected) {
@@ -154,7 +167,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "BAD_REQUEST", message: "Send 'url' or 'base64' (or 'hint'/'ingredients')." });
     }
 
-    // 1) CLARIFAI (si hay imagen)
+    // 1) Clarifai (si hay imagen)
     let concepts = [];
     let vision = null;
     if (url || base64) {
@@ -169,7 +182,7 @@ export default async function handler(req, res) {
       vision = { ok: false, note: "No image provided; using hint/ingredients." };
     }
 
-    // 2) Armar lista de ingredientes candidata
+    // 2) Lista candidata de ingredientes
     let ingList = Array.isArray(ingredients) ? ingredients.filter(Boolean) : [];
     if (ingList.length === 0 && concepts.length) {
       ingList = mapConceptsToIngredients(concepts);
@@ -178,7 +191,7 @@ export default async function handler(req, res) {
       ingList = [hint.trim()];
     }
 
-    // 3) Nutritionix interno
+    // 3) Nutritionix
     let nutrition = null;
     if (ingList.length) {
       const n = await callNutritionixInternal(req, ingList);
@@ -186,10 +199,7 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-      debug: {
-        minConf: MIN_CONF,
-        mappedIngredients: ingList,
-      },
+      debug: { minConf: MIN_CONF, mappedIngredients: ingList },
       vision,
       concepts,
       nutrition
