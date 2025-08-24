@@ -8,13 +8,16 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Send either 'url' or 'base64'" });
   }
 
+  // SOLO necesitamos la API KEY. No uses tus IDs propios ahora.
   const KEY = process.env.CLARIFAI_API_KEY || "";
-  const USER_ID = process.env.CLARIFAI_USER_ID || "nofeargt23";
-  const APP_ID = process.env.CLARIFAI_APP_ID || "nofeargt23";
-
   if (!KEY) return res.status(500).json({ error: "Missing CLARIFAI_API_KEY" });
 
-  const PRIMARY = process.env.CLARIFAI_MODEL_ID || "food-item-recognition";
+  // Par público de Clarifai (modelos pre-entrenados accesibles)
+  const USER_ID = "clarifai";
+  const APP_ID = "main";
+
+  // Primero intentamos con el modelo de comida; si no, caemos al general
+  const PRIMARY = "food-item-recognition";
   const FALLBACK = "general-image-recognition";
 
   async function run(modelId) {
@@ -23,29 +26,26 @@ export default async function handler(req, res) {
       inputs: [{ data: { image: url ? { url } : { base64 } } }],
     };
 
-    const r = await fetch(
-      `https://api.clarifai.com/v2/models/${modelId}/outputs`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Key ${KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      }
-    );
+    const r = await fetch(`https://api.clarifai.com/v2/models/${modelId}/outputs`, {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
 
     const data = await r.json();
     return { ok: r.ok, data };
   }
 
   try {
-    // 1) Intento con Food
+    // 1) Food
     let { ok, data } = await run(PRIMARY);
 
-    // Si el modelo no existe en tu app (code 21200), pruebo el general
+    // Si el modelo está temporalmente no disponible (o similar), probamos el general
     const statusCode = data?.status?.code;
-    if (!ok && statusCode === 21200) {
+    if (!ok && (statusCode === 21200 || statusCode === 21201 || statusCode === 21202)) {
       const alt = await run(FALLBACK);
       ok = alt.ok;
       data = alt.data;
