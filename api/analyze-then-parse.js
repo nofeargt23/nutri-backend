@@ -1,232 +1,182 @@
-// /api/analyze-then-parse.js
-// Clarifai (workflow) -> filtra conceptos -> mapea a ingredientes -> Nutritionix -> macros
-// Mejora: rescate de proteína débil y flag forceProtein
+// pages/api/analyze-then-parse.ts
+import type { NextApiRequest, NextApiResponse } from "next";
 
-const MIN_CONF = 0.20;        // umbral base para conservar conceptos "fuertes"
-const MAX_CONCEPTS = 50;      // traemos más para poder rescatar señales débiles
+type Concept = { name: string; value: number };
+type ClarifaiConcept = { name: string; value: number };
 
-function setCors(req, res) {
-  const allowed = (process.env.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
-  const origin = req.headers.origin || "";
-  const isAllowed = !allowed.length || allowed.includes(origin);
-  if (isAllowed && origin) res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key");
+const MIN_CONF = 0.55;
+const BAN_IF_LOW = new Set(["cake", "cookie", "candy", "ice cream", "dessert"]);
+
+function pick(raw: ClarifaiConcept[], name: string, min = 0.25) {
+  return raw.find((c) => c.name === name && c.value >= min);
 }
 
-function baseUrlFrom(req) {
-  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL;
-  const host = req.headers.host || "localhost:3000";
-  const proto = host.includes("localhost") ? "http" : "https";
-  return `${proto}://${host}`;
-}
+function mapToIngredients(concepts: Concept[], raw: ClarifaiConcept[]) {
+  const out: string[] = [];
 
-// ================== MAPEADOR MEJORADO (con rescate) ==================
-function mapConceptsToIngredients(conceptsStrong, allConcepts, opts = {}) {
-  const { forceProtein = false } = opts;
+  const has = (n: string, m = 0.25) => !!pick(raw, n, m);
 
-  // normaliza
-  const normStrong = conceptsStrong
-    .map(c => ({ name: (c.name || "").toLowerCase().trim(), confidence: c.confidence || 0 }))
-    .filter(c => c.name)
-    .sort((a,b) => b.confidence - a.confidence);
+  // Heurísticos útiles
+  if (has("arepa", 0.22) || has("arepas", 0.22)) out.push("1 arepa");
+  if (has("steak", 0.25) || has("beef", 0.25)) out.push("200 g beef steak");
+  if (has("chicken", 0.25)) out.push("150 g chicken");
+  if (has("rice", 0.28) || has("brown rice", 0.28)) out.push("1 cup rice");
+  if (has("pita", 0.22) || has("tortilla", 0.22) || has("bread", 0.28))
+    out.push("1 piece bread");
+  if (has("cheese", 0.28) || has("mozzarella", 0.22)) out.push("30 g cheese");
+  if (has("tomato", 0.25)) out.push("1 medium tomato");
 
-  const normAll = (allConcepts || [])
-    .map(c => ({ name: (c.name || "").toLowerCase().trim(), confidence: c.confidence || 0 }))
-    .filter(c => c.name)
-    .sort((a,b) => b.confidence - a.confidence);
-
-  const GRAINS   = new Set(["rice","white rice","brown rice","quinoa","couscous","oatmeal","pilaf","risotto","pasta","noodles"]);
-  const PROTEINS = new Set(["chicken","beef","pork","turkey","lamb","bacon","meat","fish","salmon","tuna","shrimp","egg","eggs"]);
-  const VEGS     = new Set(["tomato","onion","garlic","pepper","bell pepper","lettuce","spinach","carrot","corn","cauliflower","broccoli","cabbage","mushroom","zucchini","beans","lentils","chickpea","pea","potato"]);
-  const DAIRY    = new Set(["cheese","mozzarella","parmesan","blue cheese","yogurt","butter"]);
-  const DISH     = new Set(["pizza","burger","sandwich","soup","stew","porridge"]);
-
-  // umbrales fuertes
-  const TH_GRAIN = 0.15;
-  const TH_PROT  = 0.08;  // rescata proteína con señal leve en lista fuerte
-  const TH_VEG   = 0.12;
-  const TH_DAIRY = 0.12;
-  const TH_DISH  = 0.20;
-
-  const keep = [];
-  let hasGrain = false, hasProtein = false;
-
-  // 1) usa la lista fuerte primero
-  for (const c of normStrong) {
-    const n = c.name, v = c.confidence;
-    if (DISH.has(n) && v >= TH_DISH) { keep.push(n); continue; }
-    if (GRAINS.has(n) && v >= TH_GRAIN) { keep.push(n); hasGrain = true; continue; }
-    if (PROTEINS.has(n) && v >= TH_PROT) {
-      keep.push(n === "meat" ? "beef" : n);
-      hasProtein = true;
-      continue;
-    }
-    if (VEGS.has(n) && v >= TH_VEG) { keep.push(n); continue; }
-    if (DAIRY.has(n) && v >= TH_DAIRY) { keep.push(n); continue; }
-  }
-
-  // 2) rescate por co-ocurrencia: si hay grano pero sin proteína, intenta desde "all" con umbral super bajo
-  if ((hasGrain || forceProtein) && !hasProtein) {
-    const weakProt = normAll.find(c => PROTEINS.has(c.name) && c.confidence >= 0.03);
-    if (weakProt) {
-      keep.push(weakProt.name === "meat" ? "beef" : weakProt.name);
-      hasProtein = true;
-    } else if (forceProtein) {
-      // si no hay señal pero el cliente lo pide, fuerza una proteína por defecto
-      keep.push("chicken");
-      hasProtein = true;
+  // Además, mapea conceptos fuertes seleccionados
+  for (const c of concepts) {
+    switch (c.name) {
+      case "pizza":
+        out.push("1 slice pizza");
+        break;
+      case "burger":
+        out.push("1 burger");
+        break;
+      case "salad":
+        out.push("2 cups salad");
+        break;
+      // evita duplicados básicos
+      case "rice":
+        if (!out.some((x) => x.includes("rice"))) out.push("1 cup rice");
+        break;
+      case "chicken":
+        if (!out.some((x) => x.includes("chicken"))) out.push("150 g chicken");
+        break;
     }
   }
 
-  // 3) cantidades por defecto y normalización simple
-  const result = [];
-  const seen = new Set();
-  for (const n0 of keep) {
-    const n = n0.toLowerCase();
-    if (seen.has(n)) continue; seen.add(n);
-
-    if (PROTEINS.has(n)) {
-      result.push(`150 g ${n === "meat" ? "beef" : n}`);
-    } else if (GRAINS.has(n)) {
-      result.push(n.includes("rice") ? "1 cup rice" : `1 cup ${n}`);
-    } else if (["cheese","mozzarella","parmesan","blue cheese"].includes(n)) {
-      result.push(`30 g ${n}`);
-    } else if (["bread","tortilla"].includes(n)) {
-      result.push(`1 slice ${n}`);
-    } else {
-      result.push(n);
-    }
-  }
-
-  return result.slice(0, 8);
-}
-// ====================================================================
-
-async function callClarifaiWorkflow({ url, base64 }) {
-  const KEY = process.env.CLARIFAI_API_KEY;
-  const USER_ID = process.env.CLARIFAI_USER_ID || "nofeargt23";
-  const APP_ID  = process.env.CLARIFAI_APP_ID  || "nofeargt23";
-  const WORKFLOW_ID = process.env.CLARIFAI_WORKFLOW_ID || "foodnutri";
-
-  if (!KEY) throw new Error("Missing CLARIFAI_API_KEY");
-
-  const body = {
-    inputs: [{ data: { image: url ? { url } : { base64 } } }]
-  };
-
-  const resp = await fetch(`https://api.clarifai.com/v2/users/${USER_ID}/apps/${APP_ID}/workflows/${WORKFLOW_ID}/results`, {
-    method: "POST",
-    headers: {
-      Authorization: `Key ${KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-
-  const json = await resp.json().catch(() => null);
-  if (!json) throw new Error("Clarifai: invalid JSON");
-  if (json.status?.code !== 10000) {
-    const msg = json.status?.description || "Clarifai error";
-    throw new Error(`Clarifai: ${json.status?.code} ${msg}`);
-  }
-
-  const out = json.results?.[0]?.outputs?.[0];
-  const conceptsRaw = out?.data?.concepts || [];
-
-  // lista "fuerte"
-  const strong = conceptsRaw
-    .map(c => ({ name: c.name || c.id, confidence: c.value }))
-    .filter(c => typeof c.confidence === "number")
-    .sort((a,b) => b.confidence - a.confidence)
-    .slice(0, MAX_CONCEPTS)
-    .filter(c => c.confidence >= MIN_CONF);
-
-  // lista "all" sin filtrar por MIN_CONF (solo top MAX_CONCEPTS)
-  const all = conceptsRaw
-    .map(c => ({ name: c.name || c.id, confidence: c.value }))
-    .filter(c => typeof c.confidence === "number")
-    .sort((a,b) => b.confidence - a.confidence)
-    .slice(0, MAX_CONCEPTS);
-
-  return { strong, all, raw: { status: json.status, outStatus: out?.status } };
+  // Dedup
+  return Array.from(new Set(out));
 }
 
-async function callNutritionixInternal(req, ingredients) {
-  const base = baseUrlFrom(req);
-  const headers = { "Content-Type": "application/json" };
-  const k = req.headers["x-api-key"];
-  if (k) headers["x-api-key"] = k;
-
-  const resp = await fetch(`${base}/api/nutrition/parse`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ ingredients })
-  });
-  const json = await resp.json().catch(() => null);
-  return { ok: resp.ok, status: resp.status, json };
-}
-
-export default async function handler(req, res) {
-  setCors(req, res);
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
-
-  // auth opcional (requiere x-api-key si está configurada)
-  const expected = process.env.BACKEND_API_KEY || "";
-  const provided = req.headers["x-api-key"];
-  if (expected && provided !== expected) {
-    return res.status(401).json({ error: "UNAUTHORIZED" });
-  }
-
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const { url, base64, hint, ingredients, forceProtein } = req.body || {};
-    if (!url && !base64 && !hint && !ingredients) {
-      return res.status(400).json({ error: "BAD_REQUEST", message: "Send 'url' or 'base64' (or 'hint'/'ingredients')." });
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+    // auth
+    const apiKey = req.headers["x-api-key"] as string | undefined;
+    if (!apiKey || apiKey !== process.env.BACKEND_API_KEY) {
+      return res.status(401).json({ error: "UNAUTHORIZED" });
     }
 
-    // 1) Clarifai (si hay imagen)
-    let concepts = [];
-    let allConcepts = [];
-    let vision = null;
-    if (url || base64) {
-      try {
-        const v = await callClarifaiWorkflow({ url, base64 });
-        vision = { ok: true, status: v.raw.status, outStatus: v.raw.outStatus, countStrong: v.strong.length, countAll: v.all.length };
-        concepts = v.strong;
-        allConcepts = v.all;
-      } catch (e) {
-        vision = { ok: false, error: String(e.message || e) };
+    const { url, base64 } = req.body || {};
+    if (!url && !base64) {
+      return res.status(400).json({ error: "Provide url or base64" });
+    }
+
+    // ---- Clarifai
+    const user = process.env.CLARIFAI_USER_ID!;
+    const app = process.env.CLARIFAI_APP_ID!;
+    const wf = process.env.CLARIFAI_WORKFLOW_ID!;
+    const pat = process.env.CLARIFAI_PAT!;
+
+    const clarifyBody = {
+      inputs: [
+        {
+          data: {
+            image: url ? { url } : { base64 },
+          },
+        },
+      ],
+    };
+
+    const cf = await fetch(
+      `https://api.clarifai.com/v2/users/${user}/apps/${app}/workflows/${wf}/results`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Key ${pat}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(clarifyBody),
       }
-    } else {
-      vision = { ok: false, note: "No image provided; using hint/ingredients." };
+    );
+
+    const cfJson = await cf.json();
+    const out = cfJson?.results?.[0]?.outputs?.[0];
+    const statusOk = cfJson?.status?.code === 10000 && out?.status?.code === 10000;
+    if (!statusOk) {
+      return res.status(502).json({
+        vision: { ok: false, status: cfJson?.status ?? out?.status },
+        error: "Clarifai error",
+      });
     }
 
-    // 2) Lista candidata de ingredientes
-    let ingList = Array.isArray(ingredients) ? ingredients.filter(Boolean) : [];
-    if (ingList.length === 0 && (concepts.length || allConcepts.length)) {
-      ingList = mapConceptsToIngredients(concepts, allConcepts, { forceProtein: Boolean(forceProtein) });
-    }
-    if (ingList.length === 0 && typeof hint === "string" && hint.trim()) {
-      ingList = [hint.trim()];
+    const raw: ClarifaiConcept[] = (out?.data?.concepts || [])
+      .map((c: any) => ({ name: c.name, value: c.value }))
+      .sort((a: any, b: any) => b.value - a.value);
+
+    // Filtro principal
+    let strong: Concept[] = raw
+      .filter((c) => c.value >= MIN_CONF && !BAN_IF_LOW.has(c.name))
+      .map((c) => ({ name: c.name, confidence: c.value }));
+
+    // Si no hay fuertes, permite combos razonables (evita "cake" por teclado)
+    if (strong.length === 0) {
+      const fallback: Concept[] = [];
+      if (pick(raw, "steak", 0.25) || pick(raw, "beef", 0.25))
+        fallback.push({ name: "steak", confidence: pick(raw, "steak", 0.25)?.value || 0.3 });
+      if (pick(raw, "bread", 0.28) || pick(raw, "pita", 0.22) || pick(raw, "tortilla", 0.22))
+        fallback.push({ name: "bread", confidence: 0.3 });
+      if (pick(raw, "rice", 0.28) || pick(raw, "brown rice", 0.28))
+        fallback.push({ name: "rice", confidence: 0.3 });
+      if (pick(raw, "chicken", 0.25))
+        fallback.push({ name: "chicken", confidence: 0.3 });
+      if (pick(raw, "cheese", 0.28))
+        fallback.push({ name: "cheese", confidence: 0.28 });
+
+      strong = fallback;
     }
 
-    // 3) Nutritionix
-    let nutrition = null;
-    if (ingList.length) {
-      const n = await callNutritionixInternal(req, ingList);
-      nutrition = { ok: n.ok, status: n.status, data: n.json };
+    // Mapeo a ingredientes concretos para el parser nutricional
+    const mapped = mapToIngredients(strong, raw);
+
+    // ---- Nutrition (usa tu propio endpoint interno)
+    let nutrition = null as any;
+    try {
+      const base =
+        process.env.PUBLIC_BASE_URL ||
+        `https://${req.headers["x-forwarded-host"] || req.headers.host}`;
+      const nres = await fetch(`${base}/api/nutrition/parse`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey, // misma key
+        },
+        body: JSON.stringify({ ingredients: mapped }),
+      });
+      if (nres.ok) nutrition = await nres.json();
+      else
+        nutrition = {
+          ok: false,
+          status: nres.status,
+        };
+    } catch (e) {
+      nutrition = { ok: false, status: 500, error: "Nutrition call failed" };
     }
 
     return res.status(200).json({
-      debug: { minConf: MIN_CONF, mappedIngredients: ingList, forceProtein: Boolean(forceProtein) },
-      vision,
-      concepts,          // fuertes (≥ MIN_CONF)
-      allConcepts,       // crudos (para debug)
-      nutrition
+      debug: {
+        minConf: MIN_CONF,
+        mappedIngredients: mapped,
+      },
+      vision: {
+        ok: true,
+        status: cfJson?.status,
+        outStatus: out?.status,
+        countStrong: strong.length,
+        countAll: raw.length,
+      },
+      concepts: strong,
+      allConcepts: raw.map((c) => ({ name: c.name, confidence: c.value })),
+      nutrition,
     });
-  } catch (err) {
-    return res.status(500).json({ error: "SERVER_ERROR", message: String(err?.message || err) });
+  } catch (e: any) {
+    console.error(e);
+    return res.status(500).json({ error: e?.message || "Internal error" });
   }
 }
+
