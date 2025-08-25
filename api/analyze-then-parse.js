@@ -1,8 +1,16 @@
 // pages/api/analyze-then-parse.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
-type Concept = { name: string; value: number };
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "10mb", // <-- importante para base64
+    },
+  },
+};
+
 type ClarifaiConcept = { name: string; value: number };
+type Concept = { name: string; confidence: number };
 
 const MIN_CONF = 0.55;
 const BAN_IF_LOW = new Set(["cake", "cookie", "candy", "ice cream", "dessert"]);
@@ -13,10 +21,9 @@ function pick(raw: ClarifaiConcept[], name: string, min = 0.25) {
 
 function mapToIngredients(concepts: Concept[], raw: ClarifaiConcept[]) {
   const out: string[] = [];
-
   const has = (n: string, m = 0.25) => !!pick(raw, n, m);
 
-  // Heurísticos útiles
+  // Heurísticos útiles para tus casos
   if (has("arepa", 0.22) || has("arepas", 0.22)) out.push("1 arepa");
   if (has("steak", 0.25) || has("beef", 0.25)) out.push("200 g beef steak");
   if (has("chicken", 0.25)) out.push("150 g chicken");
@@ -26,7 +33,6 @@ function mapToIngredients(concepts: Concept[], raw: ClarifaiConcept[]) {
   if (has("cheese", 0.28) || has("mozzarella", 0.22)) out.push("30 g cheese");
   if (has("tomato", 0.25)) out.push("1 medium tomato");
 
-  // Además, mapea conceptos fuertes seleccionados
   for (const c of concepts) {
     switch (c.name) {
       case "pizza":
@@ -38,7 +44,6 @@ function mapToIngredients(concepts: Concept[], raw: ClarifaiConcept[]) {
       case "salad":
         out.push("2 cups salad");
         break;
-      // evita duplicados básicos
       case "rice":
         if (!out.some((x) => x.includes("rice"))) out.push("1 cup rice");
         break;
@@ -48,7 +53,6 @@ function mapToIngredients(concepts: Concept[], raw: ClarifaiConcept[]) {
     }
   }
 
-  // Dedup
   return Array.from(new Set(out));
 }
 
@@ -56,23 +60,31 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-    // auth
-    const apiKey = req.headers["x-api-key"] as string | undefined;
-    if (!apiKey || apiKey !== process.env.BACKEND_API_KEY) {
+    // Auth
+    const apiKey = (req.headers["x-api-key"] as string) || "";
+    if (!apiKey) return res.status(401).json({ error: "Missing x-api-key" });
+    if (!process.env.BACKEND_API_KEY) {
+      return res.status(500).json({ error: "Server misconfigured: BACKEND_API_KEY not set" });
+    }
+    if (apiKey !== process.env.BACKEND_API_KEY) {
       return res.status(401).json({ error: "UNAUTHORIZED" });
     }
 
-    const { url, base64 } = req.body || {};
-    if (!url && !base64) {
-      return res.status(400).json({ error: "Provide url or base64" });
+    // Entradas
+    const { url, base64 } = (req.body || {}) as { url?: string; base64?: string };
+    if (!url && !base64) return res.status(400).json({ error: "Provide url or base64" });
+
+    // Clarifai env
+    const user = process.env.CLARIFAI_USER_ID;
+    const app = process.env.CLARIFAI_APP_ID;
+    const wf = process.env.CLARIFAI_WORKFLOW_ID;
+    const pat = process.env.CLARIFAI_PAT;
+
+    if (!user || !app || !wf || !pat) {
+      return res.status(500).json({ error: "Server misconfigured: Clarifai env vars missing" });
     }
 
     // ---- Clarifai
-    const user = process.env.CLARIFAI_USER_ID!;
-    const app = process.env.CLARIFAI_APP_ID!;
-    const wf = process.env.CLARIFAI_WORKFLOW_ID!;
-    const pat = process.env.CLARIFAI_PAT!;
-
     const clarifyBody = {
       inputs: [
         {
@@ -97,24 +109,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const cfJson = await cf.json();
     const out = cfJson?.results?.[0]?.outputs?.[0];
-    const statusOk = cfJson?.status?.code === 10000 && out?.status?.code === 10000;
-    if (!statusOk) {
+    const okVision = cfJson?.status?.code === 10000 && out?.status?.code === 10000;
+
+    if (!okVision) {
       return res.status(502).json({
-        vision: { ok: false, status: cfJson?.status ?? out?.status },
         error: "Clarifai error",
+        vision: { ok: false, status: cfJson?.status || out?.status || cf.status },
       });
     }
 
     const raw: ClarifaiConcept[] = (out?.data?.concepts || [])
       .map((c: any) => ({ name: c.name, value: c.value }))
-      .sort((a: any, b: any) => b.value - a.value);
+      .sort((a, b) => b.value - a.value);
 
-    // Filtro principal
+    // Filtro anti-falsos positivos
     let strong: Concept[] = raw
       .filter((c) => c.value >= MIN_CONF && !BAN_IF_LOW.has(c.name))
       .map((c) => ({ name: c.name, confidence: c.value }));
 
-    // Si no hay fuertes, permite combos razonables (evita "cake" por teclado)
     if (strong.length === 0) {
       const fallback: Concept[] = [];
       if (pick(raw, "steak", 0.25) || pick(raw, "beef", 0.25))
@@ -131,29 +143,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       strong = fallback;
     }
 
-    // Mapeo a ingredientes concretos para el parser nutricional
     const mapped = mapToIngredients(strong, raw);
 
-    // ---- Nutrition (usa tu propio endpoint interno)
-    let nutrition = null as any;
+    // ---- Nutrition (usa tu propio endpoint ya desplegado)
+    const base = "https://nutri-backend-chi.vercel.app";
+    let nutrition: any = null;
+
     try {
-      const base =
-        process.env.PUBLIC_BASE_URL ||
-        `https://${req.headers["x-forwarded-host"] || req.headers.host}`;
       const nres = await fetch(`${base}/api/nutrition/parse`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-api-key": apiKey, // misma key
+          "x-api-key": apiKey,
         },
         body: JSON.stringify({ ingredients: mapped }),
       });
-      if (nres.ok) nutrition = await nres.json();
-      else
-        nutrition = {
-          ok: false,
-          status: nres.status,
-        };
+      nutrition = nres.ok ? await nres.json() : { ok: false, status: nres.status };
     } catch (e) {
       nutrition = { ok: false, status: 500, error: "Nutrition call failed" };
     }
@@ -179,4 +184,3 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(500).json({ error: e?.message || "Internal error" });
   }
 }
-
