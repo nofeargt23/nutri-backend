@@ -1,5 +1,5 @@
 // api/logmeal/analyze-url.ts
-// POST { url: string } -> llama a LogMeal con URL y normaliza la salida
+// POST { url: string } -> llama a LogMeal (por URL) y normaliza
 
 export default async function handler(req, res) {
   try {
@@ -20,8 +20,10 @@ export default async function handler(req, res) {
       return;
     }
 
-    // ---- Llamada a LogMeal (por URL) ----
-    const lm = await fetch("https://api.logmeal.es/v2/recognition/dish", {
+    // *** ENDPOINT CORRECTO PARA URL ***
+    const endpoint = "https://api.logmeal.es/v2/image/recognition/dish/url";
+
+    const lm = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -31,13 +33,15 @@ export default async function handler(req, res) {
     });
 
     const raw = await lm.json().catch(() => ({}));
+
     if (!lm.ok) {
-      res.status(lm.status).json({ error: raw?.error || "LogMeal URL error" });
+      res
+        .status(lm.status)
+        .json({ error: "LogMeal url error", detail: raw, status: lm.status });
       return;
     }
 
-    // ---- Normalización a { all: [{name, confidence}] } ----
-    const candidates: Array<{ name?: string; probability?: number; score?: number }> =
+    const candidates =
       raw?.recognition_results ||
       raw?.detection_results ||
       raw?.items ||
@@ -50,7 +54,7 @@ export default async function handler(req, res) {
       }))
       .filter((c) => !!c.name);
 
-    res.status(200).json({ all });
+    res.status(200).json({ all, raw });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || "Server error" });
   }
