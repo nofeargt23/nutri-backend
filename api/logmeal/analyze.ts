@@ -1,110 +1,100 @@
 // /api/logmeal/analyze.ts
-// Proxy seguro a LogMeal: recibe {base64} o {url} y devuelve {concepts:[{name,confidence}], all: [...]}
+import type { NextApiRequest, NextApiResponse } from 'next';
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+const REQUIRED_KEY = process.env.BACKEND_API_KEY!;
+const LOGMEAL_BASE = process.env.LOGMEAL_API_BASE || 'https://api.logmeal.es/v2';
+const COMPANY_TOKEN = process.env.LOGMEAL_COMPANY_TOKEN!;
+const RECOGNITION_URL = `${LOGMEAL_BASE}/image/recognition/complete`;
 
-const REQUIRED_KEY = process.env.BACKEND_API_KEY || '';
-const LOGMEAL_TOKEN = process.env.LOGMEAL_TOKEN || '';
-const LOGMEAL_BASE = process.env.LOGMEAL_BASE || 'https://api.logmeal.es/v2';
+export const config = {
+  api: {
+    bodyParser: { sizeLimit: '10mb' }, // permite imágenes grandes
+  },
+};
 
-async function callLogMeal(imageBase64?: string, url?: string) {
-  // Preferimos base64; si llega URL, la descargamos nosotros (LogMeal permite file/base64; evitamos CORS raros)
-  const body: any = {};
-  if (imageBase64) {
-    body.image = imageBase64; // LogMeal acepta { image: "<base64>" }
-  } else if (url) {
-    // Si quisieras reenviar URL directa, muchos planes lo aceptan en "url" o subiendo la imagen.
-    // Para máxima compatibilidad, aquí podrías descargar y convertir a base64; de momento enviamos url.
-    body.url = url;
-  } else {
-    throw new Error('No image data provided');
-  }
-
-  // Usamos el endpoint "recognition/complete" que devuelve múltiples ítems si existen
-  const endpoint = `${LOGMEAL_BASE}/image/recognition/complete`;
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${LOGMEAL_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`LogMeal error ${res.status}: ${text}`);
-  }
-
-  const data = await res.json();
-
-  // Normalizamos a un arreglo de { name, confidence }
-  // LogMeal suele devolver predictions con labels y scores.
-  const all: Array<{ name: string; confidence: number }> = [];
-
-  // Intentamos mapear formatos comunes:
-  // - data.recognition_results / data.foodName / data.image / etc.
-  // Hacemos extracción flexible (no rompe si algún campo cambia).
-  const tryPush = (label: any, score: any) => {
-    const name = typeof label === 'string' ? label : (label?.name || label?.label || '');
-    const confidence = typeof score === 'number' ? score : (score?.prob || score?.score || 0);
-    if (name) all.push({ name: name.toLowerCase(), confidence: Number(confidence) || 0 });
-  };
-
-  // Casos comunes
-  if (Array.isArray(data?.recognition_results)) {
-    // algunos devuelven [{name,prob}, ...]
-    for (const it of data.recognition_results) {
-      tryPush(it?.name ?? it?.label, it?.prob ?? it?.score);
-    }
-  }
-
-  if (Array.isArray(data?.food)) {
-    // otros devuelven food: [{name,score}]
-    for (const it of data.food) {
-      tryPush(it?.name ?? it?.label, it?.score ?? it?.prob);
-    }
-  }
-
-  if (Array.isArray(data?.predictions)) {
-    // formato predictions: [{label,prob}]
-    for (const it of data.predictions) {
-      tryPush(it?.label ?? it?.name, it?.prob ?? it?.score);
-    }
-  }
-
-  // Si vino vacío, intentamos un fallback minimal
-  if (all.length === 0 && data?.classification) {
-    tryPush(data.classification?.label, data.classification?.prob);
-  }
-
-  // Ordenamos por confianza desc y filtramos >0
-  all.sort((a, b) => b.confidence - a.confidence);
-  const concepts = all.filter(x => x.confidence > 0.2).slice(0, 5);
-
-  return { concepts, all };
-}
-
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
 
-    // Seguridad básica con x-api-key (igual que el resto de tu backend)
-    const key = req.headers['x-api-key'];
-    if (!key || key !== REQUIRED_KEY) return res.status(401).json({ error: 'UNAUTHORIZED' });
+    // Seguridad: validar tu x-api-key
+    const clientKey = req.headers['x-api-key'];
+    if (!clientKey || clientKey !== REQUIRED_KEY) {
+      return res.status(401).json({ error: 'UNAUTHORIZED' });
+    }
 
-    if (!LOGMEAL_TOKEN) return res.status(500).json({ error: 'LOGMEAL_TOKEN not configured' });
+    if (!COMPANY_TOKEN) {
+      return res.status(500).json({ error: 'Missing LOGMEAL_COMPANY_TOKEN' });
+    }
 
-    const { base64, url } = req.body || {};
-    const out = await callLogMeal(base64, url);
+    const { base64, url } = (req.body || {}) as { base64?: string; url?: string };
+    if (!base64 && !url) {
+      return res.status(400).json({ error: 'Provide base64 or url' });
+    }
+
+    const form = new FormData();
+
+    if (base64) {
+      const bytes = Buffer.from(base64, 'base64');
+      const blob = new Blob([bytes], { type: 'image/jpeg' });
+      form.append('image', blob, 'photo.jpg');
+    }
+
+    if (url) {
+      form.append('image_url', url);
+    }
+
+    const lmRes = await fetch(RECOGNITION_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${COMPANY_TOKEN}`,
+      },
+      body: form,
+    });
+
+    const raw = await lmRes.json().catch(() => null);
+
+    if (!lmRes.ok) {
+      return res.status(502).json({ error: 'LOGMEAL_ERROR', status: lmRes.status, raw });
+    }
+
+    // Normalizar a { all: Concept[] }
+    const concepts = extractConcepts(raw);
 
     return res.status(200).json({
       ok: true,
-      provider: 'logmeal',
-      ...out
+      all: concepts,
+      raw,
     });
   } catch (err: any) {
-    return res.status(500).json({ ok: false, error: err?.message || 'Server error' });
+    return res.status(500).json({ error: err?.message || 'Server error' });
   }
+}
+
+function extractConcepts(raw: any): Array<{ name: string; confidence: number }> {
+  const out: Array<{ name: string; confidence: number }> = [];
+  const candidates: any[] = [];
+
+  if (Array.isArray(raw?.recognition_results)) candidates.push(...raw.recognition_results);
+  if (Array.isArray(raw?.dishes)) candidates.push(...raw.dishes);
+  if (Array.isArray(raw?.items)) candidates.push(...raw.items);
+
+  const pushItem = (label: string, prob: number) => {
+    if (!label) return;
+    out.push({ name: label.toLowerCase(), confidence: Number.isFinite(prob) ? prob : 0 });
+  };
+
+  for (const c of candidates) {
+    if (c?.name && (c?.probability ?? c?.score ?? c?.confidence) != null) {
+      pushItem(c.name, c.probability ?? c.score ?? c.confidence);
+    }
+    if (c?.label && (c?.prob ?? c?.score ?? c?.confidence) != null) {
+      pushItem(c.label, c.prob ?? c.score ?? c?.confidence);
+    }
+  }
+
+  if (out.length === 0 && raw?.label) pushItem(raw.label, raw?.probability ?? 0.5);
+
+  return out.slice(0, 10);
 }
