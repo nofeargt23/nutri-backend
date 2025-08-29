@@ -2,9 +2,7 @@
 // POST { base64: string } -> sube como multipart a LogMeal y normaliza
 
 export const config = {
-  api: {
-    bodyParser: { sizeLimit: "6mb" }, // por si envías fotos medianas
-  },
+  api: { bodyParser: { sizeLimit: "8mb" } },
 };
 
 export default async function handler(req, res) {
@@ -26,30 +24,32 @@ export default async function handler(req, res) {
       return;
     }
 
-    // ---- Preparar multipart/form-data ----
-    // Node 18+ tiene Blob/FormData globales (undici)
+    // Node 18+: Blob/FormData disponibles globalmente
     const bin = Buffer.from(base64, "base64");
     const blob = new Blob([bin], { type: "image/jpeg" });
     const form = new FormData();
+    // LogMeal espera el campo "image"
     form.append("image", blob, "photo.jpg");
 
-    // ---- Llamada a LogMeal (por archivo) ----
-    const lm = await fetch("https://api.logmeal.es/v2/recognition/dish", {
+    // *** ENDPOINT CORRECTO ***
+    const url = "https://api.logmeal.es/v2/image/recognition/dish";
+
+    const lm = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      body: form,
+      headers: { Authorization: `Bearer ${token}` }, // no pongas Content-Type aquí
+      body: form, // FormData pone el boundary automáticamente
     });
 
     const raw = await lm.json().catch(() => ({}));
+
     if (!lm.ok) {
-      res.status(lm.status).json({ error: raw?.error || "LogMeal file error" });
+      res
+        .status(lm.status)
+        .json({ error: "LogMeal file error", detail: raw, status: lm.status });
       return;
     }
 
-    // ---- Normalización a { all: [{name, confidence}] } ----
-    const candidates: Array<{ name?: string; probability?: number; score?: number }> =
+    const candidates =
       raw?.recognition_results ||
       raw?.detection_results ||
       raw?.items ||
@@ -62,9 +62,8 @@ export default async function handler(req, res) {
       }))
       .filter((c) => !!c.name);
 
-    res.status(200).json({ all });
+    res.status(200).json({ all, raw });
   } catch (e: any) {
     res.status(500).json({ error: e?.message || "Server error" });
   }
 }
-
