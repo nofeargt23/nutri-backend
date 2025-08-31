@@ -1,61 +1,36 @@
-// api/logmeal/analyze-url.ts
-// POST { url: string } -> llama a LogMeal (por URL) y normaliza
+import type { VercelRequest, VercelResponse } from "vercel";
+import axios from "axios";
 
-export default async function handler(req, res) {
+const COMPANY = process.env.LOGMEAL_COMPANY_TOKEN!;
+const USER = process.env.LOGMEAL_USER_TOKEN!;
+const BASE = process.env.LOGMEAL_BASE_URL || "https://api.logmeal.com";
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    if (req.method !== "POST") {
-      res.status(405).json({ error: "Method not allowed" });
-      return;
-    }
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
     const { url } = req.body || {};
-    if (!url) {
-      res.status(400).json({ error: "Missing 'url'" });
-      return;
-    }
+    if (!url) return res.status(400).json({ error: "Missing url" });
 
-    const token = process.env.LOGMEAL_COMPANY_TOKEN;
-    if (!token) {
-      res.status(500).json({ error: "Missing LOGMEAL_COMPANY_TOKEN" });
-      return;
-    }
+    const r = await axios.post(
+      `${BASE}/image/recognition/complete`,
+      { image: url },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${USER}`,
+          "x-app-token": COMPANY,
+        },
+        timeout: 20000,
+      }
+    );
 
-    // *** ENDPOINT CORRECTO PARA URL ***
-    const endpoint = "https://api.logmeal.es/v2/image/recognition/dish/url";
-
-    const lm = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ image_url: url }),
+    res.status(200).json(r.data);
+  } catch (err: any) {
+    const status = err?.response?.status || 500;
+    res.status(status).json({
+      error: "logmeal-url-failed",
+      detail: err?.response?.data || err?.message || String(err),
     });
-
-    const raw = await lm.json().catch(() => ({}));
-
-    if (!lm.ok) {
-      res
-        .status(lm.status)
-        .json({ error: "LogMeal url error", detail: raw, status: lm.status });
-      return;
-    }
-
-    const candidates =
-      raw?.recognition_results ||
-      raw?.detection_results ||
-      raw?.items ||
-      [];
-
-    const all = candidates
-      .map((c) => ({
-        name: c.name || "item",
-        confidence: Number(c.probability ?? c.score ?? 0),
-      }))
-      .filter((c) => !!c.name);
-
-    res.status(200).json({ all, raw });
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || "Server error" });
   }
 }
