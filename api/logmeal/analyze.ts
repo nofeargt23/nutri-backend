@@ -1,4 +1,4 @@
-// /api/logmeal/analyze.ts  (BACKEND en Vercel)
+// /api/logmeal/analyze.ts  (BACKEND - Vercel)
 import type { VercelRequest, VercelResponse } from 'vercel';
 import FormData from 'form-data';
 import fetch from 'node-fetch';
