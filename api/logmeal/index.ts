@@ -1,68 +1,46 @@
-// api/logmeal/index.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import fetch from "node-fetch";
-import FormData from "form-data";
+import axios from "axios";
 
-const LOGMEAL_BASE = process.env.LOGMEAL_API_BASE || "https://api.logmeal.com";
-const LOGMEAL_TOKEN = process.env.LOGMEAL_TOKEN;                 // REQUIRED
-const LOGMEAL_API_USER_TOKEN = process.env.LOGMEAL_API_USER_TOKEN; // optional
-const LOGMEAL_COMPANY_TOKEN = process.env.LOGMEAL_COMPANY_TOKEN;   // optional
-
-function authHeaders() {
-  const h: Record<string, string> = {
-    Authorization: `Bearer ${LOGMEAL_TOKEN}`,
-  };
-  if (LOGMEAL_API_USER_TOKEN) h["x-api-user-token"] = LOGMEAL_API_USER_TOKEN;
-  if (LOGMEAL_COMPANY_TOKEN) h["x-company-token"] = LOGMEAL_COMPANY_TOKEN;
-  return h;
-}
+const LOGMEAL_API_BASE = process.env.LOGMEAL_API_BASE || "https://api.logmeal.com";
+const LOGMEAL_API_USER_TOKEN = process.env.LOGMEAL_API_USER_TOKEN; // el token “APIUser_*”
+const LOGMEAL_TOKEN = process.env.LOGMEAL_TOKEN || LOGMEAL_API_USER_TOKEN; // compat
+const COMPANY_TOKEN = process.env.LOGMEAL_COMPANY_TOKEN || "";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== "POST") {
+    // La ruta existe -> 405 confirma que está bien desplegada
+    res.setHeader("Allow", "POST");
+    return res.status(405).json({ ok: false, error: "Method Not Allowed" });
+  }
+
   try {
-    if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
-    if (!LOGMEAL_TOKEN) return res.status(500).json({ error: "Missing LOGMEAL_TOKEN" });
-
     const { mode, url, base64 } = req.body || {};
-    if (mode !== "url" && mode !== "base64") {
-      return res.status(400).json({ error: "Invalid mode. Use 'url' or 'base64'." });
+    if (!mode || (mode !== "url" && mode !== "base64")) {
+      return res.status(400).json({ ok: false, error: "Invalid mode. Use 'url' or 'base64'." });
     }
 
-    let lmRes: Response;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${LOGMEAL_TOKEN}`,
+    };
+    if (COMPANY_TOKEN) headers["x-company-token"] = COMPANY_TOKEN;
 
+    let payload: any;
     if (mode === "url") {
-      lmRes = await fetch(`${LOGMEAL_BASE}/image/recognition/type`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ image_url: url }),
-      });
+      if (!url) return res.status(400).json({ ok: false, error: "Missing 'url'." });
+      payload = { image_url: url };
     } else {
-      const clean = String(base64).replace(/^data:image\/[a-zA-Z]+;base64,/, "");
-      const form = new FormData();
-      form.append("image_base64", clean);
-      lmRes = await fetch(`${LOGMEAL_BASE}/image/recognition/type`, {
-        method: "POST",
-        headers: { ...authHeaders(), ...form.getHeaders() },
-        body: form as any,
-      });
+      if (!base64) return res.status(400).json({ ok: false, error: "Missing 'base64'." });
+      payload = { image: base64 }; // sin prefijo data:
     }
 
-    if (!lmRes.ok) {
-      const txt = await lmRes.text().catch(() => "");
-      return res.status(lmRes.status).json({ error: "LogMeal upstream", detail: txt });
-    }
+    // endpoint recomendado (reconocimiento + nutrición simplificada)
+    const endpoint = `${LOGMEAL_API_BASE}/v2/image/recognition/complete`;
 
-    const result = await lmRes.json();
-    const items =
-      (result?.recognition_results || result?.food || []).map((it: any) => ({
-        name: it?.name || it?.food_name || "item",
-        score: it?.prob || it?.score || 0,
-      })) ?? [];
-
-    return res.status(200).json({
-      items,
-      totals: { calories: undefined, protein_g: undefined, carbs_g: undefined, fat_g: undefined },
-    });
+    const r = await axios.post(endpoint, payload, { headers, timeout: 15000 });
+    return res.status(200).json({ ok: true, data: r.data });
   } catch (err: any) {
-    return res.status(500).json({ error: "Server error", detail: String(err?.message || err) });
+    const status = err?.response?.status || 500;
+    const detail = err?.response?.data || err?.message || "Unknown error";
+    return res.status(status).json({ ok: false, error: "Upstream error", detail });
   }
 }
