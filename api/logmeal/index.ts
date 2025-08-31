@@ -1,106 +1,91 @@
-// /api/logmeal/index.ts
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { Buffer } from 'node:buffer';
+// api/logmeal/index.ts
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import fetch from "node-fetch";
+import FormData from "form-data";
 
-// Permite payloads base64 grandes sin cortar
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: '15mb',
-    },
-  },
-};
+const LOGMEAL_BASE = process.env.LOGMEAL_API_BASE || "https://api.logmeal.com";
+const LOGMEAL_TOKEN = process.env.LOGMEAL_TOKEN;          // Bearer (API Key)
+const LOGMEAL_API_USER_TOKEN = process.env.LOGMEAL_API_USER_TOKEN; // (si lo tienes)
+const COMPANY_TOKEN = process.env.LOGMEAL_COMPANY_TOKEN;   // (opcional)
 
-type Mode = 'url' | 'base64';
-
-function json(res: VercelResponse, code: number, payload: any) {
-  res.status(code).json(payload);
+function authHeaders() {
+  const h: Record<string, string> = {
+    Authorization: `Bearer ${LOGMEAL_TOKEN}`,
+  };
+  if (LOGMEAL_API_USER_TOKEN) h["x-api-user-token"] = LOGMEAL_API_USER_TOKEN;
+  if (COMPANY_TOKEN) h["x-company-token"] = COMPANY_TOKEN;
+  return h;
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'POST') {
-    return json(res, 405, { error: 'Method Not Allowed' });
-  }
-
-  const API_BASE = process.env.LOGMEAL_API_BASE || 'https://api.logmeal.com';
-  const USER_TOKEN =
-    process.env.LOGMEAL_API_USER_TOKEN ||
-    process.env.LOGMEAL_TOKEN; // por si lo guardaste con este nombre
-
-  if (!USER_TOKEN) {
-    return json(res, 500, {
-      error: 'Missing LOGMEAL_API_USER_TOKEN environment variable',
-    });
-  }
-
-  const { mode, imageUrl, base64 } = (req.body || {}) as {
-    mode?: Mode;
-    imageUrl?: string;
-    base64?: string;
-  };
-
-  if (mode !== 'url' && mode !== 'base64') {
-    return json(res, 400, { error: "Invalid mode. Use 'url' or 'base64'" });
-  }
-
-  const endpoint = `${API_BASE}/v2/recognition/complete`;
-
   try {
-    let upstream: Response;
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method Not Allowed" });
+    }
 
-    if (mode === 'url') {
-      if (!imageUrl) {
-        return json(res, 400, { error: 'imageUrl is required for mode=url' });
-      }
+    if (!LOGMEAL_TOKEN) {
+      return res.status(500).json({ error: "Missing LOGMEAL_TOKEN" });
+    }
 
-      upstream = await fetch(endpoint, {
-        method: 'POST',
+    const { mode, url, base64 } = req.body || {};
+
+    if (mode !== "url" && mode !== "base64") {
+      return res.status(400).json({ error: "Invalid mode. Use 'url' or 'base64'." });
+    }
+
+    let lmRes: Response;
+
+    if (mode === "url") {
+      // /image/recognition/type con URL
+      lmRes = await fetch(`${LOGMEAL_BASE}/image/recognition/type`, {
+        method: "POST",
         headers: {
-          Authorization: `Bearer ${USER_TOKEN}`,
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
+          ...authHeaders(),
         },
-        body: JSON.stringify({ image_url: imageUrl }),
+        body: JSON.stringify({ image_url: url }),
       });
     } else {
-      // mode === 'base64'
-      if (!base64) {
-        return json(res, 400, { error: 'base64 is required for mode=base64' });
-      }
-
-      const buf = Buffer.from(base64, 'base64');
-      // En Node 18+ (Vercel) Blob/FormData existen vía undici
-      const blob = new Blob([buf], { type: 'image/jpeg' });
+      // /image/recognition/type con base64 (sin el prefijo data:)
+      const clean = (base64 as string).replace(/^data:image\/[a-zA-Z]+;base64,/, "");
       const form = new FormData();
-      form.append('image', blob, 'image.jpg');
-
-      upstream = await fetch(endpoint, {
-        method: 'POST',
+      form.append("image_base64", clean);
+      lmRes = await fetch(`${LOGMEAL_BASE}/image/recognition/type`, {
+        method: "POST",
         headers: {
-          Authorization: `Bearer ${USER_TOKEN}`,
-          // NO pongas Content-Type aquí; fetch lo setea para multipart
+          ...authHeaders(),
+          ...form.getHeaders(),
         },
         body: form as any,
       });
     }
 
-    // Intenta parsear JSON (si el upstream falla, igual intentamos leer JSON del error)
-    const data = await upstream
-      .json()
-      .catch(async () => ({ raw: await upstream.text() }));
-
-    if (!upstream.ok) {
-      return json(res, upstream.status, {
-        error: 'LogMeal upstream error',
-        detail: data,
-      });
+    if (!lmRes.ok) {
+      const txt = await lmRes.text().catch(() => "");
+      return res.status(lmRes.status).json({ error: "LogMeal upstream", detail: txt });
     }
 
-    // Devuelve tal cual la respuesta de LogMeal
-    return json(res, 200, data);
+    const result = await lmRes.json();
+
+    // 🔎 Normalización mínima a tu formato
+    const items =
+      (result?.recognition_results || result?.food || []).map((it: any) => ({
+        name: it?.name || it?.food_name || "item",
+        score: it?.prob || it?.score || 0,
+      })) ?? [];
+
+    const payload = {
+      items,
+      totals: {
+        calories: undefined,
+        protein_g: undefined,
+        carbs_g: undefined,
+        fat_g: undefined,
+      },
+    };
+
+    return res.status(200).json(payload);
   } catch (err: any) {
-    return json(res, 500, {
-      error: 'Upstream fetch failed',
-      message: err?.message ?? String(err),
-    });
+    return res.status(500).json({ error: "Server error", detail: String(err?.message || err) });
   }
 }
