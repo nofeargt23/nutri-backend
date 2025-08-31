@@ -1,7 +1,4 @@
 // api/logmeal.ts
-// Única función Serverless para LogMeal (URL y Base64).
-// Incluye GET ?ping=1 para comprobar que está viva.
-
 import axios from "axios";
 import FormData from "form-data";
 
@@ -11,7 +8,6 @@ const BASE    = process.env.LOGMEAL_BASE_URL || "https://api.logmeal.com";
 
 export default async function handler(req: any, res: any) {
   try {
-    // Ping simple desde el navegador:
     if (req.method === "GET") {
       if (!COMPANY || !USER) {
         res.status(500).json({ ok: false, error: "Missing LOGMEAL tokens" });
@@ -38,9 +34,9 @@ export default async function handler(req: any, res: any) {
           headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${USER}`,
-            "x-app-token": COMPANY,
+            "x-app-token": COMPANY
           },
-          timeout: 20000,
+          timeout: 20000
         }
       );
       res.status(200).json(r.data);
@@ -63,10 +59,10 @@ export default async function handler(req: any, res: any) {
           headers: {
             ...form.getHeaders(),
             "Authorization": `Bearer ${USER}`,
-            "x-app-token": COMPANY,
+            "x-app-token": COMPANY
           },
           timeout: 20000,
-          maxBodyLength: 10 * 1024 * 1024,
+          maxBodyLength: 10 * 1024 * 1024
         }
       );
       res.status(200).json(r.data);
@@ -78,7 +74,7 @@ export default async function handler(req: any, res: any) {
     const status = err?.response?.status || 500;
     res.status(status).json({
       error: "logmeal-failed",
-      detail: err?.response?.data || err?.message || String(err),
+      detail: err?.response?.data || err?.message || String(err)
     });
   }
 }
