@@ -85,15 +85,12 @@ function cors(res: any) {
 async function compressUnder1MB(input: Buffer) {
   let sharp: any;
   try {
-    // evita errores ESM/CJS: carga sharp solo aquí
     const mod = await import("sharp");
     sharp = mod.default || mod;
   } catch (e) {
     console.error("sharp import failed:", e);
-    // si no podemos importar sharp, devolvemos el buffer tal cual (puede dar 413, pero no rompe la función)
-    return input;
+    return input; // sin sharp, seguimos tal cual (puede dar 413 pero no rompe)
   }
-
   try {
     let buf = input, quality = 80, width: number | null = 1600;
     for (let i = 0; i < 6 && buf.length > MAX_BYTES; i++) {
@@ -339,7 +336,7 @@ export default async function handler(req: any, res: any) {
 
     const firstName = dishes?.[0]?.name || dishes?.[0]?.dish || null;
 
-    // normalizar
+    // normalizar + fallbacks
     let base = normalizeNutrition(nutrition || {});
     if (baseIsEmpty(base)) {
       const fromIng = totalsFromIngredients(ingredients);
