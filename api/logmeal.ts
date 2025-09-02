@@ -222,4 +222,156 @@ function cloneZeros() {
 function addTotals(a:any,b:any){ for (const k of Object.keys(a)) a[k]+= (isNum(b[k])? b[k]:0); return a; }
 
 function totalsFromIngredients(raw: any): any | null {
-  if (!raw) return null
+  if (!raw) return null;
+  // busca arrays que contengan items con nutrición
+  const stacks: any[] = [raw];
+  let out = cloneZeros();
+  let had = false;
+
+  while (stacks.length) {
+    const v = stacks.pop();
+    if (!v || typeof v !== "object") continue;
+    if (Array.isArray(v)) {
+      for (const it of v) {
+        if (it && typeof it === "object") {
+          // nutrición por 100g del ingrediente
+          const nn = normalizeNutrition(it);
+          const hasSome = Object.values(nn).some(x => isNum(x));
+          if (hasSome) {
+            // si sabemos gramaje del ingrediente, escalamos; si no, asumimos que nn es ya por 100g y lo sumamos como aproximación pobre
+            const g = gramsFromItem(it);
+            const factor = g ? g/100 : 1;
+            const scaled = { ...nn };
+            for (const k of Object.keys(scaled)) {
+              if (isNum(scaled[k])) scaled[k] = +(scaled[k]*factor).toFixed(2);
+            }
+            out = addTotals(out, scaled);
+            had = true;
+          }
+        }
+        if (it && typeof it === "object") stacks.push(it);
+      }
+    } else {
+      for (const k of Object.keys(v)) stacks.push(v[k]);
+    }
+  }
+  return had ? out : null;
+}
+
+// ===== Heurísticos de combos (último recurso) =====
+function comboHeuristicByName(name?: string|null){
+  const n = (name||"").toLowerCase();
+  const hasRice = /arroz|rice|yakimeshi|yakisoba|paella|risotto/.test(n);
+  const hasBeef = /carne|res|beef|ternera|vaca/.test(n);
+  const hasVeg  = /verduras?|vegetales?|asparagus|esp[aá]rragos|mushroom|champiñ/.test(n);
+  if (hasRice && hasBeef){
+    // mezcla 50% arroz, 35% carne de res magra, 15% verduras
+    const rice = { calories:130, protein_g:2.7, carbs_g:28, fat_g:0.3, fiber_g:0.4, sugars_g:0.1, sodium_mg:1, potassium_mg:35, calcium_mg:10, iron_mg:0.2, vitamin_d_iu:0 };
+    const beef = { calories:250, protein_g:26, carbs_g:0, fat_g:15, fiber_g:0, sugars_g:0, sodium_mg:72, potassium_mg:318, calcium_mg:18, iron_mg:2.6, vitamin_d_iu:7 };
+    const veg  = { calories:25, protein_g:2.5, carbs_g:4, fat_g:0.2, fiber_g:2, sugars_g:2, sodium_mg:3, potassium_mg:200, calcium_mg:20, iron_mg:0.6, vitamin_d_iu:0 };
+    const w = [0.5,0.35,0.15];
+    const mix:any = {};
+    for (const k of Object.keys(rice)) mix[k] = +(rice[k]*w[0] + beef[k]*w[1] + veg[k]*w[2]).toFixed(1);
+    return mix;
+  }
+  return null;
+}
+
+const extractDishes = (o: any) => Array.isArray(o?.recognition_results) ? o.recognition_results
+  : Array.isArray(o?.dishes) ? o.dishes : Array.isArray(o?.items) ? o.items : [];
+
+// ===== Handler =====
+export default async function handler(req: any, res: any) {
+  cors(res);
+  if (req.method === "OPTIONS") { res.status(200).end(); return; }
+  if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
+
+  try {
+    const ct = (req.headers["content-type"] || "").toLowerCase();
+    let file: any = null; let body: any = null;
+
+    if (ct.startsWith("application/json")) {
+      const chunks: Buffer[] = []; for await (const ch of req) chunks.push(ch as Buffer);
+      const raw = Buffer.concat(chunks).toString("utf8"); body = raw ? JSON.parse(raw) : {};
+    } else {
+      const mp = await parseMultipart(req); file = mp.file; body = mp.fields;
+    }
+
+    // cache
+    let cacheKey = "";
+    if (file?.buffer) cacheKey = "BUF:" + fastHash(file.buffer);
+    else if (body?.imageId) cacheKey = "ID:" + String(body.imageId);
+    if (cacheKey) { const c = cacheGet(cacheKey); if (c) { res.status(200).json(c); return; } }
+
+    // pipeline
+    let imageId: string | null = body?.imageId || null;
+    let seg: any = null;
+
+    if (file) {
+      file.buffer = await compressUnder1MB(file.buffer);
+      file.mime = "image/jpeg";
+      file.filename = "image.jpg";
+
+      seg = await postImage("/v2/image/segmentation/complete", file);
+      imageId = seg?.imageId || seg?.image_id || seg?.id || imageId;
+    } else if (!imageId) {
+      res.status(400).json({ error: "Missing image or imageId" }); return;
+    }
+
+    let dishes = extractDishes(seg);
+    if (!dishes.length) {
+      try { const r1 = await postJSON("/v2/image/recognition/complete", { imageId }); dishes = extractDishes(r1); } catch {}
+      if (!dishes.length && file) { try { const r2 = await postImage("/v2/recognition/dish", file); dishes = extractDishes(r2); } catch {} }
+    }
+
+    // ingredientes + nutrición
+    let ingredients: any = null;
+    try { ingredients = await postJSON("/v2/nutrition/recipe/ingredients", { imageId }); } catch {}
+    if (!ingredients && file) { try { ingredients = await postImage("/v2/nutrition/recipe/ingredients", file); } catch {} }
+
+    let nutrition: any = null;
+    try {
+      const payload = imageId ? { imageId } : ingredients ? { ingredients } : {};
+      nutrition = await postJSON("/v2/nutrition/recipe/nutritionalInfo", payload);
+    } catch {}
+
+    const firstName = dishes?.[0]?.name || dishes?.[0]?.dish || null;
+
+    // 1) normalizar lo que venga
+    let base = normalizeNutrition(nutrition || {});
+
+    // 2) si faltan macros, intentar sumar desde "ingredients"
+    if (baseIsEmpty(base)) {
+      const fromIng = totalsFromIngredients(ingredients);
+      if (fromIng) base = fromIng;
+    }
+
+    // 3) último recurso: heurístico por nombre (arroz con carne + verduras)
+    if (baseIsEmpty(base)) {
+      const h = comboHeuristicByName(firstName);
+      if (h) base = h;
+    }
+
+    if (!dishes.length) dishes = [{ name: "Plato (ingredientes)", prob: null }];
+
+    const out = {
+      imageId,
+      candidates: dishes.map((d: any) => ({
+        name: d?.name || d?.dish || "Plato",
+        confidence: d?.prob || d?.score || null,
+        base_per: "100g",
+        base,
+        provider: "logmeal",
+        raw: { dish: d, seg },
+      })),
+      ingredients,
+      nutrition_raw: nutrition
+    };
+
+    if (cacheKey) cacheSet(cacheKey, out);
+    res.status(200).json(out);
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+}
+--- FILE END ---
