@@ -1,8 +1,6 @@
---- FILE START ---
 // @ts-nocheck
 import Busboy from "busboy";
 import { Blob } from "buffer";
-import sharp from "sharp";
 
 const BASE = "https://api.logmeal.com";
 const TTL = +(process.env.CACHE_TTL_SECONDS || 43200); // 12h
@@ -83,21 +81,37 @@ function cors(res: any) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// ===== Compresión server-side (<1MB) =====
+// ===== Compresión server-side (<1MB) con import dinámico de sharp =====
 async function compressUnder1MB(input: Buffer) {
-  let buf = input, quality = 80, width: number | null = 1600;
-  for (let i = 0; i < 6 && buf.length > MAX_BYTES; i++) {
-    const p = sharp(buf).rotate();
-    if (width) p.resize({ width, withoutEnlargement: true });
-    buf = await p.jpeg({ quality, mozjpeg: true }).toBuffer();
-    quality = Math.max(40, quality - 10);
-    if (width) width = Math.max(700, Math.floor(width * 0.8));
+  let sharp: any;
+  try {
+    // evita errores ESM/CJS: carga sharp solo aquí
+    const mod = await import("sharp");
+    sharp = mod.default || mod;
+  } catch (e) {
+    console.error("sharp import failed:", e);
+    // si no podemos importar sharp, devolvemos el buffer tal cual (puede dar 413, pero no rompe la función)
+    return input;
   }
-  if (buf.length > MAX_BYTES) buf = await sharp(buf).jpeg({ quality: 40, mozjpeg: true }).toBuffer();
-  return buf;
+
+  try {
+    let buf = input, quality = 80, width: number | null = 1600;
+    for (let i = 0; i < 6 && buf.length > MAX_BYTES; i++) {
+      const p = sharp(buf).rotate();
+      if (width) p.resize({ width, withoutEnlargement: true });
+      buf = await p.jpeg({ quality, mozjpeg: true }).toBuffer();
+      quality = Math.max(40, quality - 10);
+      if (width) width = Math.max(700, Math.floor(width * 0.8));
+    }
+    if (buf.length > MAX_BYTES) buf = await sharp(buf).jpeg({ quality: 40, mozjpeg: true }).toBuffer();
+    return buf;
+  } catch (e) {
+    console.error("sharp processing failed:", e);
+    return input;
+  }
 }
 
-// ===== Utilidades de búsqueda =====
+// ===== Utilidades de nutrición (EN + ES) y fallbacks =====
 const isNum = (x: any) => typeof x === "number" && Number.isFinite(x);
 
 function deepFindNumberByKey(obj: any, testKey: (k: string) => boolean): number | null {
@@ -143,7 +157,6 @@ function getNutrient(obj: any, keyMatchers: (string|RegExp)[], arrayMatchers?: R
   return isNum(arr) ? arr : null;
 }
 
-// ===== Normalizador (EN + ES) =====
 function normalizeNutrition(n: any) {
   const en = {
     kcal: [/kcal\b/, /energy.*kcal/, /^calories?$/],
@@ -200,7 +213,6 @@ function normalizeNutrition(n: any) {
 }
 const baseIsEmpty = (b: any) => [b?.protein_g, b?.carbs_g, b?.fat_g, b?.fiber_g, b?.sugars_g].every(v => !isNum(v));
 
-// ===== Totales desde ingredientes (fallback) =====
 function numberAtKeys(o: any, keys: string[]) {
   for (const k of keys) {
     const v = o?.[k];
@@ -213,32 +225,26 @@ function numberAtKeys(o: any, keys: string[]) {
   return null;
 }
 function gramsFromItem(it: any): number | null {
-  // intenta distintas convenciones
   return numberAtKeys(it, ["grams","g","weight_g","weight","mass_g","qty_g","quantity_g","amount_g","cantidad_g"]) ?? null;
 }
 function cloneZeros() {
   return { calories:0, protein_g:0, carbs_g:0, fat_g:0, fiber_g:0, sugars_g:0, sodium_mg:0, potassium_mg:0, calcium_mg:0, iron_mg:0, vitamin_d_iu:0 };
 }
 function addTotals(a:any,b:any){ for (const k of Object.keys(a)) a[k]+= (isNum(b[k])? b[k]:0); return a; }
-
 function totalsFromIngredients(raw: any): any | null {
   if (!raw) return null;
-  // busca arrays que contengan items con nutrición
   const stacks: any[] = [raw];
   let out = cloneZeros();
   let had = false;
-
   while (stacks.length) {
     const v = stacks.pop();
     if (!v || typeof v !== "object") continue;
     if (Array.isArray(v)) {
       for (const it of v) {
         if (it && typeof it === "object") {
-          // nutrición por 100g del ingrediente
           const nn = normalizeNutrition(it);
           const hasSome = Object.values(nn).some(x => isNum(x));
           if (hasSome) {
-            // si sabemos gramaje del ingrediente, escalamos; si no, asumimos que nn es ya por 100g y lo sumamos como aproximación pobre
             const g = gramsFromItem(it);
             const factor = g ? g/100 : 1;
             const scaled = { ...nn };
@@ -257,15 +263,12 @@ function totalsFromIngredients(raw: any): any | null {
   }
   return had ? out : null;
 }
-
-// ===== Heurísticos de combos (último recurso) =====
 function comboHeuristicByName(name?: string|null){
   const n = (name||"").toLowerCase();
   const hasRice = /arroz|rice|yakimeshi|yakisoba|paella|risotto/.test(n);
   const hasBeef = /carne|res|beef|ternera|vaca/.test(n);
   const hasVeg  = /verduras?|vegetales?|asparagus|esp[aá]rragos|mushroom|champiñ/.test(n);
   if (hasRice && hasBeef){
-    // mezcla 50% arroz, 35% carne de res magra, 15% verduras
     const rice = { calories:130, protein_g:2.7, carbs_g:28, fat_g:0.3, fiber_g:0.4, sugars_g:0.1, sodium_mg:1, potassium_mg:35, calcium_mg:10, iron_mg:0.2, vitamin_d_iu:0 };
     const beef = { calories:250, protein_g:26, carbs_g:0, fat_g:15, fiber_g:0, sugars_g:0, sodium_mg:72, potassium_mg:318, calcium_mg:18, iron_mg:2.6, vitamin_d_iu:7 };
     const veg  = { calories:25, protein_g:2.5, carbs_g:4, fat_g:0.2, fiber_g:2, sugars_g:2, sodium_mg:3, potassium_mg:200, calcium_mg:20, iron_mg:0.6, vitamin_d_iu:0 };
@@ -276,7 +279,6 @@ function comboHeuristicByName(name?: string|null){
   }
   return null;
 }
-
 const extractDishes = (o: any) => Array.isArray(o?.recognition_results) ? o.recognition_results
   : Array.isArray(o?.dishes) ? o.dishes : Array.isArray(o?.items) ? o.items : [];
 
@@ -337,16 +339,12 @@ export default async function handler(req: any, res: any) {
 
     const firstName = dishes?.[0]?.name || dishes?.[0]?.dish || null;
 
-    // 1) normalizar lo que venga
+    // normalizar
     let base = normalizeNutrition(nutrition || {});
-
-    // 2) si faltan macros, intentar sumar desde "ingredients"
     if (baseIsEmpty(base)) {
       const fromIng = totalsFromIngredients(ingredients);
       if (fromIng) base = fromIng;
     }
-
-    // 3) último recurso: heurístico por nombre (arroz con carne + verduras)
     if (baseIsEmpty(base)) {
       const h = comboHeuristicByName(firstName);
       if (h) base = h;
@@ -371,7 +369,7 @@ export default async function handler(req: any, res: any) {
     if (cacheKey) cacheSet(cacheKey, out);
     res.status(200).json(out);
   } catch (e: any) {
+    console.error("Proxy fatal error:", e);
     res.status(500).json({ error: String(e?.message || e) });
   }
 }
---- FILE END ---
