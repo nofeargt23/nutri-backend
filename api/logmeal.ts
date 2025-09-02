@@ -1,11 +1,13 @@
 // @ts-nocheck
 import Busboy from "busboy";
 import { Blob } from "buffer";
+import sharp from "sharp";
 
 const BASE = "https://api.logmeal.com";
 const TTL = +(process.env.CACHE_TTL_SECONDS || 43200); // 12h
+const MAX_BYTES = 1048576; // 1MB
 
-// Cache en memoria por instancia
+// ===== Caché en memoria por instancia =====
 const IMAGE_CACHE = new Map<string, { ts: number; data: any }>();
 const cacheGet = (k: string) => {
   const h = IMAGE_CACHE.get(k);
@@ -22,6 +24,7 @@ function fastHash(buf: Buffer) {
   return (h >>> 0).toString(16);
 }
 
+// ===== Tokens + llamadas =====
 function getTokens(): string[] {
   const raw = process.env.LOGMEAL_TOKENS || "";
   const list = raw.split(",").map(s => s.trim()).filter(Boolean);
@@ -33,10 +36,11 @@ async function callWithTokens(url: string, init: RequestInit = {}) {
   const start = Math.floor(Date.now() / 60000) % tokens.length;
   let lastErr: any = null;
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[(start + i) % tokens.length];
+    const token = tokens[(start + i) % tokens.length];
     let resp: any = null;
-    try { resp = await fetch(url, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${t}` } }); }
-    catch (e) { lastErr = e; continue; }
+    try {
+      resp = await fetch(url, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } });
+    } catch (e) { lastErr = e; continue; }
     if (resp.ok) return resp;
     const txt = await resp.text().catch(() => "");
     if ([401,403,429].includes(resp.status)) { lastErr = new Error(`${resp.status}: ${txt.slice(0,200)}`); continue; }
@@ -55,6 +59,8 @@ async function postImage(path: string, file: { buffer: Buffer; filename?: string
   const r = await callWithTokens(`${BASE}${path}`, { method: "POST", body: fd });
   return r.json();
 }
+
+// ===== Parse multipart =====
 function parseMultipart(req: any): Promise<{ file: { buffer: Buffer; filename?: string; mime?: string } | null; fields: any }> {
   return new Promise((resolve, reject) => {
     const bb = Busboy({ headers: req.headers });
@@ -76,7 +82,27 @@ function cors(res: any) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// ---------- Normalizador + heurístico ----------
+// ===== Compresión server-side (<1MB) =====
+async function compressUnder1MB(input: Buffer) {
+  // intentos progresivos: bajar calidad y ancho hasta <1MB
+  let buf = input;
+  let quality = 80;
+  let width: number | null = 1600;
+  for (let i = 0; i < 6 && buf.length > MAX_BYTES; i++) {
+    const pipeline = sharp(buf).rotate();
+    if (width) pipeline.resize({ width, withoutEnlargement: true });
+    buf = await pipeline.jpeg({ quality, mozjpeg: true }).toBuffer();
+    quality = Math.max(40, quality - 10);
+    if (width) width = Math.max(700, Math.floor(width * 0.8));
+  }
+  // si aún pasa 1MB, último intento a 40% sin resize extra
+  if (buf.length > MAX_BYTES) {
+    buf = await sharp(buf).jpeg({ quality: 40, mozjpeg: true }).toBuffer();
+  }
+  return buf;
+}
+
+// ===== Normalizador de nutrición (igual que antes) =====
 const isNum = (x: any) => typeof x === "number" && Number.isFinite(x);
 function deepFindNumberByKey(obj: any, testKey: (k: string) => boolean): number | null {
   if (!obj || typeof obj !== "object") return null;
@@ -146,6 +172,7 @@ const baseIsEmpty = (b: any) => [b?.protein_g, b?.carbs_g, b?.fat_g, b?.fiber_g,
 const extractDishes = (o: any) => Array.isArray(o?.recognition_results) ? o.recognition_results
   : Array.isArray(o?.dishes) ? o.dishes : Array.isArray(o?.items) ? o.items : [];
 
+// ===== Handler =====
 export default async function handler(req: any, res: any) {
   cors(res);
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
@@ -172,8 +199,17 @@ export default async function handler(req: any, res: any) {
     let imageId: string | null = body?.imageId || null;
     let seg: any = null;
 
-    if (file) { seg = await postImage("/v2/image/segmentation/complete", file); imageId = seg?.imageId || seg?.image_id || seg?.id || imageId; }
-    else if (!imageId) { res.status(400).json({ error: "Missing image or imageId" }); return; }
+    if (file) {
+      // 🔽 compresión a < 1MB ANTES de llamar a LogMeal
+      file.buffer = await compressUnder1MB(file.buffer);
+      file.mime = "image/jpeg";
+      file.filename = "image.jpg";
+
+      seg = await postImage("/v2/image/segmentation/complete", file);
+      imageId = seg?.imageId || seg?.image_id || seg?.id || imageId;
+    } else if (!imageId) {
+      res.status(400).json({ error: "Missing image or imageId" }); return;
+    }
 
     let dishes = extractDishes(seg);
     if (!dishes.length) {
