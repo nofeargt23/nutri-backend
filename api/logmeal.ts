@@ -1,7 +1,28 @@
-// api/logmeal.ts — proxy con rotación + normalizador + heurísticos de respaldo
+Replace the file at path api/logmeal.ts with the following content and save it.
+
+---FILE START---
 import Busboy from "busboy";
+import { createHash } from "crypto";
 
 const BASE = "https://api.logmeal.com";
+const TTL = +(process.env.CACHE_TTL_SECONDS || 43200); // 12h por defecto
+
+// Caché en memoria (por instancia)
+const IMAGE_CACHE = new Map<string, { ts: number; data: any }>();
+
+function cacheGet(key: string) {
+  const hit = IMAGE_CACHE.get(key);
+  if (!hit) return null;
+  if ((Date.now() - hit.ts) / 1000 > TTL) { IMAGE_CACHE.delete(key); return null; }
+  return hit.data;
+}
+function cacheSet(key: string, data: any) {
+  IMAGE_CACHE.set(key, { ts: Date.now(), data });
+}
+
+function sha1(buf: Buffer) {
+  return createHash("sha1").update(buf).digest("hex");
+}
 
 function getTokens(): string[] {
   const raw = process.env.LOGMEAL_TOKENS || "";
@@ -63,7 +84,7 @@ function cors(res: any) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-// ==== normalizador robusto (claves + arrays) ====
+// ====== normalizador (claves + arrays) ======
 const isNum = (x: any) => typeof x === "number" && Number.isFinite(x);
 
 function deepFindNumberByKey(obj: any, testKey: (k: string) => boolean): number | null {
@@ -144,40 +165,83 @@ function normalizeNutrition(n: any) {
   };
 }
 
-// ==== heurísticos de respaldo por nombre (100 g) ====
-function heuristicsByName(name: string | undefined | null) {
+// ====== heurísticos (más alimentos, por 100 g) ======
+function heuristicsByName(name?: string | null) {
   const n = (name || "").toLowerCase();
-  if (/huevo|huevos|egg\b/.test(n)) {
-    return { calories: 155, protein_g: 13.0, carbs_g: 1.1, fat_g: 11.0, fiber_g: 0, sugars_g: 1.1, sodium_mg: 124, potassium_mg: 126, calcium_mg: 50, iron_mg: 1.2, vitamin_d_iu: 87 };
-  }
-  if (/pollo|chicken/.test(n)) {
-    return { calories: 165, protein_g: 31.0, carbs_g: 0, fat_g: 3.6, fiber_g: 0, sugars_g: 0, sodium_mg: 74, potassium_mg: 256, calcium_mg: 15, iron_mg: 1.0, vitamin_d_iu: null };
-  }
-  if (/arroz|rice/.test(n)) {
-    return { calories: 130, protein_g: 2.7, carbs_g: 28.0, fat_g: 0.3, fiber_g: 0.4, sugars_g: 0.1, sodium_mg: 1, potassium_mg: 35, calcium_mg: 10, iron_mg: 0.2, vitamin_d_iu: null };
-  }
+  const H: Record<string, any> = {
+    huevo:      { calories:155, protein_g:13.0, carbs_g:1.1, fat_g:11.0, fiber_g:0, sugars_g:1.1, sodium_mg:124, potassium_mg:126, calcium_mg:50, iron_mg:1.2, vitamin_d_iu:87 },
+    egg:        { calories:155, protein_g:13.0, carbs_g:1.1, fat_g:11.0, fiber_g:0, sugars_g:1.1, sodium_mg:124, potassium_mg:126, calcium_mg:50, iron_mg:1.2, vitamin_d_iu:87 },
+    pollo:      { calories:165, protein_g:31.0, carbs_g:0,   fat_g:3.6,  fiber_g:0, sugars_g:0,   sodium_mg:74,  potassium_mg:256, calcium_mg:15, iron_mg:1.0 },
+    chicken:    { calories:165, protein_g:31.0, carbs_g:0,   fat_g:3.6,  fiber_g:0, sugars_g:0,   sodium_mg:74,  potassium_mg:256, calcium_mg:15, iron_mg:1.0 },
+    arroz:      { calories:130, protein_g:2.7,  carbs_g:28,  fat_g:0.3,  fiber_g:0.4, sugars_g:0.1, sodium_mg:1, potassium_mg:35, calcium_mg:10, iron_mg:0.2 },
+    rice:       { calories:130, protein_g:2.7,  carbs_g:28,  fat_g:0.3,  fiber_g:0.4, sugars_g:0.1, sodium_mg:1, potassium_mg:35, calcium_mg:10, iron_mg:0.2 },
+    pasta:      { calories:157, protein_g:5.8,  carbs_g:30.6,fat_g:0.9,  fiber_g:1.8, sugars_g:1.1, sodium_mg:1, potassium_mg:44, calcium_mg:7, iron_mg:0.6 },
+    beef:       { calories:250, protein_g:26,   carbs_g:0,   fat_g:17,   fiber_g:0, sugars_g:0,    sodium_mg:72, potassium_mg:318, calcium_mg:18, iron_mg:2.6 },
+    pork:       { calories:242, protein_g:27,   carbs_g:0,   fat_g:14,   fiber_g:0, sugars_g:0,    sodium_mg:62, potassium_mg:362, calcium_mg:19, iron_mg:1.1 },
+    salmon:     { calories:208, protein_g:20,   carbs_g:0,   fat_g:13,   fiber_g:0, sugars_g:0,    sodium_mg:59, potassium_mg:363, calcium_mg:9,  iron_mg:0.3 },
+    tuna:       { calories:144, protein_g:23,   carbs_g:0,   fat_g:5,    fiber_g:0, sugars_g:0,    sodium_mg:50, potassium_mg:237, calcium_mg:4,  iron_mg:1.0 },
+    bread:      { calories:265, protein_g:9,    carbs_g:49,  fat_g:3.2,  fiber_g:2.7, sugars_g:5,  sodium_mg:491,potassium_mg:115, calcium_mg:144, iron_mg:3.6 },
+    queso:      { calories:402, protein_g:25,   carbs_g:1.3, fat_g:33,   fiber_g:0, sugars_g:0.5,  sodium_mg:621,potassium_mg:98,  calcium_mg:721, iron_mg:0.7 },
+    cheese:     { calories:402, protein_g:25,   carbs_g:1.3, fat_g:33,   fiber_g:0, sugars_g:0.5,  sodium_mg:621,potassium_mg:98,  calcium_mg:721, iron_mg:0.7 },
+    avocado:    { calories:160, protein_g:2,    carbs_g:9,   fat_g:15,   fiber_g:7, sugars_g:0.7,  sodium_mg:7,  potassium_mg:485, calcium_mg:12, iron_mg:0.6 },
+    banana:     { calories:89,  protein_g:1.1,  carbs_g:23,  fat_g:0.3,  fiber_g:2.6, sugars_g:12, sodium_mg:1,  potassium_mg:358, calcium_mg:5,  iron_mg:0.3 },
+    apple:      { calories:52,  protein_g:0.3,  carbs_g:14,  fat_g:0.2,  fiber_g:2.4, sugars_g:10, sodium_mg:1,  potassium_mg:107, calcium_mg:6,  iron_mg:0.1 }
+  };
+  for (const k of Object.keys(H)) if (n.includes(k)) return H[k];
   return null;
 }
-const baseIsEmpty = (b: any) =>
-  [b?.protein_g, b?.carbs_g, b?.fat_g, b?.fiber_g, b?.sugars_g].every(v => !isNum(v));
+const baseIsEmpty = (b: any) => [b?.protein_g, b?.carbs_g, b?.fat_g, b?.fiber_g, b?.sugars_g].every(v => !isNum(v));
 
+// ====== merge de ingredientes con limpieza ======
+const STOP = new Set(["plato","dish","salad","ensalada","soup","sopa","with","con","de","a","y","the","la","el","los","las","un","una","food"]);
+function cleanWord(w: string) {
+  return w.replace(/[().,;:!?#]/g, "").trim().toLowerCase();
+}
+function addNamePieces(dst: Set<string>, s: string) {
+  const parts = s.split(/[,/+-]| con | with | y | de /i);
+  for (const p of parts) {
+    const w = cleanWord(p);
+    if (!w || w.length < 2) continue;
+    if (STOP.has(w)) continue;
+    dst.add(w);
+  }
+}
+function extractNamesFromArray(arr: any[], keyCandidates = ["name","ingredient","ingredient_name","label","title"]) {
+  const out: string[] = [];
+  for (const it of arr || []) {
+    for (const k of keyCandidates) {
+      const val = (it && typeof it === "object") ? it[k] : null;
+      if (typeof val === "string") out.push(val);
+    }
+  }
+  return out;
+}
+function collectIngredientNames(seg: any, ingredients: any, dishes: any) {
+  const bag = new Set<string>();
+  // de ingredientes API
+  const apiList = ingredients?.ingredients || ingredients?.data?.ingredients || ingredients?.list || ingredients?.items || [];
+  for (const s of extractNamesFromArray(apiList)) addNamePieces(bag, s);
+  // de reconocimiento de platos
+  const ds = Array.isArray(dishes) ? dishes : [];
+  for (const d of ds) {
+    const nm = d?.name || d?.dish;
+    if (nm) addNamePieces(bag, nm);
+  }
+  // de segmentación si aporta labels
+  const segItems = seg?.items || seg?.objects || [];
+  for (const s of extractNamesFromArray(segItems, ["label","name","class"])) addNamePieces(bag, s);
+
+  // devolver top 12
+  return Array.from(bag).slice(0, 12);
+}
+
+// ====== helpers platos ======
 function extractDishes(obj: any): any[] {
   if (!obj) return [];
   if (Array.isArray(obj.recognition_results)) return obj.recognition_results;
   if (Array.isArray(obj.dishes)) return obj.dishes;
   if (Array.isArray(obj.items)) return obj.items;
   return [];
-}
-function extractIngredientNames(ing: any): string[] {
-  const arr = ing?.ingredients || ing?.data?.ingredients || ing?.list || ing?.items || [];
-  const names: string[] = [];
-  if (Array.isArray(arr)) {
-    for (const it of arr) {
-      const n = it?.name || it?.ingredient || it?.ingredient_name || it?.label;
-      if (n && typeof n === "string") names.push(n);
-    }
-  }
-  return names;
 }
 
 export default async function handler(req: any, res: any) {
@@ -201,7 +265,16 @@ export default async function handler(req: any, res: any) {
       body = mp.fields;
     }
 
-    // Pipeline
+    // ------ caché (key por buffer o por imageId) ------
+    let cacheKey = "";
+    if (file?.buffer) cacheKey = "BUF:" + sha1(file.buffer);
+    else if (body?.imageId) cacheKey = "ID:" + String(body.imageId);
+    if (cacheKey) {
+      const cached = cacheGet(cacheKey);
+      if (cached) { res.status(200).json(cached); return; }
+    }
+
+    // ------ Pipeline ------
     let imageId: string | null = body?.imageId || null;
     let seg: any = null;
 
@@ -225,7 +298,7 @@ export default async function handler(req: any, res: any) {
     let nutrition: any = null;
     try { const payload = imageId ? { imageId } : ingredients ? { ingredients } : {}; nutrition = await postJSON("/v2/nutrition/recipe/nutritionalInfo", payload); } catch {}
 
-    // Normalizar y aplicar heurístico si falta
+    // normalizar + heurístico
     const firstName = dishes?.[0]?.name || dishes?.[0]?.dish || null;
     let base = normalizeNutrition(nutrition || {});
     if (baseIsEmpty(base)) {
@@ -233,22 +306,33 @@ export default async function handler(req: any, res: any) {
       if (h) base = h;
     }
 
+    // ingredientes mejorados
+    const ingredients_best = collectIngredientNames(seg, ingredients, dishes);
+
     if (!dishes.length) {
-      const names = extractIngredientNames(ingredients);
-      dishes = [{ name: names.slice(0,3).join(", ") || "Plato (ingredientes)", prob: null }];
+      const fallbackName = ingredients_best.slice(0,3).join(", ") || "Plato (ingredientes)";
+      dishes = [{ name: fallbackName, prob: null }];
     }
 
-    const candidates = dishes.map((d: any) => ({
-      name: d?.name || d?.dish || "Plato",
-      confidence: d?.prob || d?.score || null,
-      base_per: "100g",
-      base,
-      provider: "logmeal",
-      raw: { dish: d, seg },
-    }));
+    const out = {
+      imageId,
+      candidates: dishes.map((d: any) => ({
+        name: d?.name || d?.dish || "Plato",
+        confidence: d?.prob || d?.score || null,
+        base_per: "100g",
+        base,
+        provider: "logmeal",
+        raw: { dish: d, seg },
+      })),
+      ingredients,
+      ingredients_best,
+      nutrition_raw: nutrition
+    };
 
-    res.status(200).json({ imageId, candidates, ingredients, nutrition_raw: nutrition });
+    if (cacheKey) cacheSet(cacheKey, out);
+    res.status(200).json(out);
   } catch (e: any) {
     res.status(500).json({ error: String(e?.message || e) });
   }
 }
+---FILE END---
