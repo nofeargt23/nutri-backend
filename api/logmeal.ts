@@ -144,4 +144,111 @@ function normalizeNutrition(n: any) {
   };
 }
 
-// ==== heurísticos de respaldo por nombre (100 g) ==
+// ==== heurísticos de respaldo por nombre (100 g) ====
+function heuristicsByName(name: string | undefined | null) {
+  const n = (name || "").toLowerCase();
+  if (/huevo|huevos|egg\b/.test(n)) {
+    return { calories: 155, protein_g: 13.0, carbs_g: 1.1, fat_g: 11.0, fiber_g: 0, sugars_g: 1.1, sodium_mg: 124, potassium_mg: 126, calcium_mg: 50, iron_mg: 1.2, vitamin_d_iu: 87 };
+  }
+  if (/pollo|chicken/.test(n)) {
+    return { calories: 165, protein_g: 31.0, carbs_g: 0, fat_g: 3.6, fiber_g: 0, sugars_g: 0, sodium_mg: 74, potassium_mg: 256, calcium_mg: 15, iron_mg: 1.0, vitamin_d_iu: null };
+  }
+  if (/arroz|rice/.test(n)) {
+    return { calories: 130, protein_g: 2.7, carbs_g: 28.0, fat_g: 0.3, fiber_g: 0.4, sugars_g: 0.1, sodium_mg: 1, potassium_mg: 35, calcium_mg: 10, iron_mg: 0.2, vitamin_d_iu: null };
+  }
+  return null;
+}
+const baseIsEmpty = (b: any) =>
+  [b?.protein_g, b?.carbs_g, b?.fat_g, b?.fiber_g, b?.sugars_g].every(v => !isNum(v));
+
+function extractDishes(obj: any): any[] {
+  if (!obj) return [];
+  if (Array.isArray(obj.recognition_results)) return obj.recognition_results;
+  if (Array.isArray(obj.dishes)) return obj.dishes;
+  if (Array.isArray(obj.items)) return obj.items;
+  return [];
+}
+function extractIngredientNames(ing: any): string[] {
+  const arr = ing?.ingredients || ing?.data?.ingredients || ing?.list || ing?.items || [];
+  const names: string[] = [];
+  if (Array.isArray(arr)) {
+    for (const it of arr) {
+      const n = it?.name || it?.ingredient || it?.ingredient_name || it?.label;
+      if (n && typeof n === "string") names.push(n);
+    }
+  }
+  return names;
+}
+
+export default async function handler(req: any, res: any) {
+  cors(res);
+  if (req.method === "OPTIONS") { res.status(200).end(); return; }
+  if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
+
+  try {
+    const ct = (req.headers["content-type"] || "").toLowerCase();
+    let file: any = null;
+    let body: any = null;
+
+    if (ct.startsWith("application/json")) {
+      const chunks: Buffer[] = [];
+      for await (const ch of req) chunks.push(ch as Buffer);
+      const raw = Buffer.concat(chunks).toString("utf8");
+      body = raw ? JSON.parse(raw) : {};
+    } else {
+      const mp = await parseMultipart(req);
+      file = mp.file;
+      body = mp.fields;
+    }
+
+    // Pipeline
+    let imageId: string | null = body?.imageId || null;
+    let seg: any = null;
+
+    if (file) {
+      seg = await postImage("/v2/image/segmentation/complete", file);
+      imageId = seg?.imageId || seg?.image_id || seg?.id || imageId;
+    } else if (!imageId) {
+      res.status(400).json({ error: "Missing image or imageId" }); return;
+    }
+
+    let dishes = extractDishes(seg);
+    if (!dishes.length) {
+      try { const r1 = await postJSON("/v2/image/recognition/complete", { imageId }); dishes = extractDishes(r1); } catch {}
+      if (!dishes.length && file) { try { const r2 = await postImage("/v2/recognition/dish", file); dishes = extractDishes(r2); } catch {} }
+    }
+
+    let ingredients: any = null;
+    try { ingredients = await postJSON("/v2/nutrition/recipe/ingredients", { imageId }); } catch {}
+    if (!ingredients && file) { try { ingredients = await postImage("/v2/nutrition/recipe/ingredients", file); } catch {} }
+
+    let nutrition: any = null;
+    try { const payload = imageId ? { imageId } : ingredients ? { ingredients } : {}; nutrition = await postJSON("/v2/nutrition/recipe/nutritionalInfo", payload); } catch {}
+
+    // Normalizar y aplicar heurístico si falta
+    const firstName = dishes?.[0]?.name || dishes?.[0]?.dish || null;
+    let base = normalizeNutrition(nutrition || {});
+    if (baseIsEmpty(base)) {
+      const h = heuristicsByName(firstName);
+      if (h) base = h;
+    }
+
+    if (!dishes.length) {
+      const names = extractIngredientNames(ingredients);
+      dishes = [{ name: names.slice(0,3).join(", ") || "Plato (ingredientes)", prob: null }];
+    }
+
+    const candidates = dishes.map((d: any) => ({
+      name: d?.name || d?.dish || "Plato",
+      confidence: d?.prob || d?.score || null,
+      base_per: "100g",
+      base,
+      provider: "logmeal",
+      raw: { dish: d, seg },
+    }));
+
+    res.status(200).json({ imageId, candidates, ingredients, nutrition_raw: nutrition });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+}
