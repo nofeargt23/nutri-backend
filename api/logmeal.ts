@@ -111,17 +111,38 @@ async function compressUnder1MB(input: Buffer) {
 // ===== Utilidades de nutrición (EN + ES) y fallbacks =====
 const isNum = (x: any) => typeof x === "number" && Number.isFinite(x);
 
+// Convierte "13 g", "1,2", {value: "13"} → 13
+function toNumber(val: any): number | null {
+  if (typeof val === "number" && Number.isFinite(val)) return val;
+  if (typeof val === "string") {
+    const m = val.replace(",", ".").match(/-?\d+(\.\d+)?/);
+    if (m) return Number(m[0]);
+  }
+  if (val && typeof val === "object") {
+    const n = toNumber(val.value ?? val.amount ?? val.quantity ?? val.qty ?? val.val);
+    return Number.isFinite(n as any) ? (n as number) : null;
+  }
+  return null;
+}
+
 function deepFindNumberByKey(obj: any, testKey: (k: string) => boolean): number | null {
   if (!obj || typeof obj !== "object") return null;
   for (const key of Object.keys(obj)) {
-    const lk = key.toLowerCase(); const val = (obj as any)[key];
-    if (isNum(val) && testKey(lk)) return val;
-    if (val && typeof val === "object" && !Array.isArray(val)) {
-      const r = deepFindNumberByKey(val, testKey); if (isNum(r)) return r;
+    const lk = key.toLowerCase();
+    const val = (obj as any)[key];
+
+    if (testKey(lk)) {
+      const n = toNumber(val);
+      if (Number.isFinite(n as any)) return n as number;
+    }
+    if (val && typeof val === "object") {
+      const r = deepFindNumberByKey(val, testKey);
+      if (Number.isFinite(r as any)) return r as number;
     }
   }
   return null;
 }
+
 function pickNumberByKey(obj: any, keys: (string | RegExp)[]) {
   for (const pat of keys) {
     const test = typeof pat === "string" ? (k: string) => k === pat.toLowerCase() : (k: string) => (pat as RegExp).test(k);
@@ -129,7 +150,12 @@ function pickNumberByKey(obj: any, keys: (string | RegExp)[]) {
   }
   return null;
 }
-function pickNumberFromArrays(obj: any, nameRegexes: RegExp[], valueCandidates = ["value","amount","quantity","qty","val","per_100g","per100","per100g","kcal","g","mg"]) {
+
+function pickNumberFromArrays(
+  obj: any,
+  nameRegexes: RegExp[],
+  valueCandidates = ["value","amount","quantity","qty","val","per_100g","per100","per100g","kcal","g","mg"]
+) {
   const stack: any[] = [obj];
   while (stack.length) {
     const v = stack.pop();
@@ -139,7 +165,12 @@ function pickNumberFromArrays(obj: any, nameRegexes: RegExp[], valueCandidates =
         if (it && typeof it === "object") {
           const label = String(it.name ?? it.label ?? it.tag ?? it.key ?? it.nutrient ?? it.id ?? "").toLowerCase();
           if (label && nameRegexes.some(rx => rx.test(label))) {
-            for (const vk of valueCandidates) { const val = it[vk]; if (isNum(val)) return val; }
+            for (const vk of valueCandidates) {
+              if (vk in it) {
+                const n = toNumber((it as any)[vk]);
+                if (Number.isFinite(n as any)) return n as number;
+              }
+            }
           }
         }
         if (it && typeof it === "object") stack.push(it);
@@ -148,6 +179,7 @@ function pickNumberFromArrays(obj: any, nameRegexes: RegExp[], valueCandidates =
   }
   return null;
 }
+
 function getNutrient(obj: any, keyMatchers: (string|RegExp)[], arrayMatchers?: RegExp[]) {
   const direct = pickNumberByKey(obj, keyMatchers); if (isNum(direct)) return direct;
   const arr = pickNumberFromArrays(obj, arrayMatchers ?? keyMatchers.map(p => typeof p === "string" ? new RegExp(`\\b${p}\\b`) : p as RegExp));
@@ -214,10 +246,8 @@ function numberAtKeys(o: any, keys: string[]) {
   for (const k of keys) {
     const v = o?.[k];
     if (isNum(v)) return v;
-    if (typeof v === "string") {
-      const n = Number(v.replace(/[^\d.]/g, ""));
-      if (Number.isFinite(n)) return n;
-    }
+    const n = toNumber(v);
+    if (Number.isFinite(n as any)) return n as number;
   }
   return null;
 }
@@ -333,6 +363,8 @@ export default async function handler(req: any, res: any) {
       const payload = imageId ? { imageId } : ingredients ? { ingredients } : {};
       nutrition = await postJSON("/v2/nutrition/recipe/nutritionalInfo", payload);
     } catch {}
+    // Fallback por si tu cuenta usa otra ruta
+    if (!nutrition) { try { nutrition = await postJSON("/v2/recipe/nutritionalInfo", payload); } catch {} }
 
     const firstName = dishes?.[0]?.name || dishes?.[0]?.dish || null;
 
