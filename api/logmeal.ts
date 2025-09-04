@@ -395,6 +395,49 @@ function mixFromPrimaryName(name: string): any | null {
   return hits.length ? avg(hits) : null;
 }
 
+// ---- IMPUTACIÓN de macros y micros si faltan ----
+function imputeFromPrior(base: any, prior: Nut, kcal?: number) {
+  const out = { ...base };
+  const pk = 4 * (prior.protein_g ?? 0) + 4 * (prior.carbs_g ?? 0) + 9 * (prior.fat_g ?? 0);
+  const s =
+    isNum(kcal) && pk > 0 ? Math.max(0.6, Math.min(1.6, (kcal as number) / pk)) : 1;
+
+  const fill = (k: keyof Nut) => {
+    if (!isNum(out[k]) && isNum((prior as any)[k])) {
+      out[k] = +((prior as any)[k] * s).toFixed(1);
+    }
+  };
+
+  fill("protein_g");
+  fill("carbs_g");
+  fill("fat_g");
+  ["fiber_g", "sugars_g", "sodium_mg", "potassium_mg", "calcium_mg", "iron_mg", "vitamin_d_iu"].forEach(
+    (k) => {
+      if (!isNum(out[k]) && isNum((prior as any)[k])) out[k] = (prior as any)[k];
+    }
+  );
+
+  if (!isNum(out.calories) && ["protein_g", "carbs_g", "fat_g"].every((k) => isNum(out[k]))) {
+    out.calories = +(4 * out.protein_g + 4 * out.carbs_g + 9 * out.fat_g).toFixed(1);
+  }
+  return out;
+}
+
+function imputeMissing(base: any, primaryName: string, _conf: number, names: string[]) {
+  const needMacros = ["protein_g", "carbs_g", "fat_g"].some((k) => !isNum(base[k]));
+  if (!needMacros) return base;
+
+  let prior = mixFromPrimaryName(primaryName);
+  if (!prior && names && names.length > 1) {
+    for (const n of names.slice(0, 4)) {
+      const p = mixFromPrimaryName(n);
+      if (p) { prior = p; break; }
+    }
+  }
+  if (prior) return imputeFromPrior(base, prior, base.calories);
+  return base;
+}
+
 // ---------------------- saneo y kcal Atwater ----------------------
 function fillMissing(base: any, ref: any) {
   if (!base || !ref) return base;
@@ -503,14 +546,14 @@ export default async function handler(req:any,res:any){
     let base = normalizePer100g(nutrition || {});
     if (baseIsEmpty(base)) base = per100FromIngredients(ingredients);
 
-    // relleno controlado por confianza
+    // referencia limitada por nombre (solo si conf alta)
     let refMix: any = null;
     if (conf >= CONF_THRESHOLD) {
-      // solo mezclamos por el nombre principal si el modelo está seguro
       refMix = mixFromPrimaryName(primaryName);
     }
 
     if (base) base = fillMissing(base, refMix);
+    if (base) base = imputeMissing(base, primaryName, conf, names);
     if (base) base = sanitize(base, refMix);
     if (!base && refMix) base = refMix;
 
