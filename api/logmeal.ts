@@ -241,7 +241,9 @@ function getNutrient(obj: any, keys: (string | RegExp)[], arr?: RegExp[]) {
 function candidateScopes(n: any): any[] {
   if (!n || typeof n !== "object") return [];
   const scopes: any[] = [];
-  const push = (o: any) => { if (o && typeof o === "object") scopes.push(o); };
+  const push = (o: any) => {
+    if (o && typeof o === "object") scopes.push(o);
+  };
   for (const k of Object.keys(n))
     if (/(^|_|\s)per_?100g$|(^|_|\s)100g$|per_?100$/i.test(k)) push(n[k]);
   const stack = [n];
@@ -249,11 +251,12 @@ function candidateScopes(n: any): any[] {
     const v = stack.pop();
     if (!v || typeof v !== "object") continue;
     if (Array.isArray(v)) v.forEach((x) => stack.push(x));
-    else for (const k of Object.keys(v)) {
-      const c = v[k];
-      if (/(^|_|\s)per_?100g$|(^|_|\s)100g$|per_?100$/i.test(k)) push(c);
-      if (c && typeof c === "object") stack.push(c);
-    }
+    else
+      for (const k of Object.keys(v)) {
+        const c = v[k];
+        if (/(^|_|\s)per_?100g$|(^|_|\s)100g$|per_?100$/i.test(k)) push(c);
+        if (c && typeof c === "object") stack.push(c);
+      }
   }
   scopes.push(n);
   return scopes;
@@ -299,7 +302,17 @@ function normalizePer100g(n: any) {
     const iron = getNutrient(o, [...en.iron, ...es.iron]);
     const vitd = getNutrient(o, [...en.vitd, ...es.vitd]);
     return {
-      kcal, protein, carbs, fat, fiber, sugar, sodium, potas, calci, iron, vitd,
+      kcal,
+      protein,
+      carbs,
+      fat,
+      fiber,
+      sugar,
+      sodium,
+      potas,
+      calci,
+      iron,
+      vitd,
     };
   };
   for (const s of scopes) {
@@ -307,9 +320,16 @@ function normalizePer100g(n: any) {
     const anyMacro = [v.protein, v.carbs, v.fat].some(isNum);
     if (isNum(v.kcal) || anyMacro) {
       let kcal = v.kcal;
-      if (isNum(kcal) && (kcal as number) > 900 &&
-          [v.protein, v.carbs, v.fat].every(isNum)) {
-        kcal = +(4*(v.protein as number)+4*(v.carbs as number)+9*(v.fat as number)).toFixed(1);
+      if (
+        isNum(kcal) &&
+        (kcal as number) > 900 &&
+        [v.protein, v.carbs, v.fat].every(isNum)
+      ) {
+        kcal = +(
+          4 * (v.protein as number) +
+          4 * (v.carbs as number) +
+          9 * (v.fat as number)
+        ).toFixed(1);
       }
       return {
         calories: isNum(kcal) ? kcal : null,
@@ -330,13 +350,33 @@ function normalizePer100g(n: any) {
 }
 const baseIsEmpty = (b: any) =>
   !b ||
-  [b.protein_g, b.carbs_g, b.fat_g, b.fiber_g, b.sugars_g, b.calories].every((v) => !isNum(v));
+  [b.protein_g, b.carbs_g, b.fat_g, b.fiber_g, b.sugars_g, b.calories].every(
+    (v) => !isNum(v)
+  );
 const zeros = () => ({
-  calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0, sugars_g: 0,
-  sodium_mg: 0, potassium_mg: 0, calcium_mg: 0, iron_mg: 0, vitamin_d_iu: 0,
+  calories: 0,
+  protein_g: 0,
+  carbs_g: 0,
+  fat_g: 0,
+  fiber_g: 0,
+  sugars_g: 0,
+  sodium_mg: 0,
+  potassium_mg: 0,
+  calcium_mg: 0,
+  iron_mg: 0,
+  vitamin_d_iu: 0,
 });
-const add = (a: any, b: any) => { for (const k of Object.keys(a)) a[k] += isNum(b[k]) ? b[k] : 0; return a; };
-const avg = (arr: any[]) => { if (!arr.length) return null; const t = zeros(); arr.forEach((x) => add(t, x)); for (const k of Object.keys(t)) t[k] = +(t[k] / arr.length).toFixed(2); return t; };
+const add = (a: any, b: any) => {
+  for (const k of Object.keys(a)) a[k] += isNum(b[k]) ? b[k] : 0;
+  return a;
+};
+const avg = (arr: any[]) => {
+  if (!arr.length) return null;
+  const t = zeros();
+  arr.forEach((x) => add(t, x));
+  for (const k of Object.keys(t)) t[k] = +(t[k] / arr.length).toFixed(2);
+  return t;
+};
 function per100FromIngredients(raw: any) {
   if (!raw) return null;
   const items: any[] = [];
@@ -359,34 +399,82 @@ function per100FromIngredients(raw: any) {
 
 // ---------------------- mezcla limitada por nombre principal ----------------------
 type Nut = {
-  calories: number; protein_g: number; carbs_g: number; fat_g: number;
-  fiber_g?: number; sugars_g?: number; sodium_mg?: number; potassium_mg?: number;
-  calcium_mg?: number; iron_mg?: number; vitamin_d_iu?: number;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  fiber_g?: number;
+  sugars_g?: number;
+  sodium_mg?: number;
+  potassium_mg?: number;
+  calcium_mg?: number;
+  iron_mg?: number;
+  vitamin_d_iu?: number;
 };
 const F: Record<string, Nut> = {
-  egg:{calories:155,protein_g:13,carbs_g:1.1,fat_g:11.1,fiber_g:0,sugars_g:1.1,sodium_mg:124,potassium_mg:126,calcium_mg:50,iron_mg:1.2,vitamin_d_iu:87},
-  bacon:{calories:541,protein_g:37,carbs_g:1.4,fat_g:42,sodium_mg:1717,potassium_mg:565,calcium_mg:11,iron_mg:1.4},
-  ham:{calories:145,protein_g:20,carbs_g:1.5,fat_g:6.7,sodium_mg:1200},
-  charcuterie:{calories:300,protein_g:18,carbs_g:2,fat_g:24,sodium_mg:1200},
-  sobrasada:{calories:459,protein_g:11,carbs_g:1.5,fat_g:45,sodium_mg:1400},
-  bread:{calories:265,protein_g:9,carbs_g:49,fat_g:3.2,fiber_g:2.7,sugars_g:5,sodium_mg:491,calcium_mg:144,iron_mg:3.6},
-  rice:{calories:130,protein_g:2.4,carbs_g:28,fat_g:0.3,fiber_g:0.4},
-  cheese:{calories:402,protein_g:25,carbs_g:1.3,fat_g:33},
-  ricotta:{calories:174,protein_g:11.3,carbs_g:3,fat_g:13},
-  cottage:{calories:98,protein_g:11.1,carbs_g:3.4,fat_g:4.3},
-  beef:{calories:250,protein_g:26,carbs_g:0,fat_g:17},
-  chicken:{calories:165,protein_g:31,carbs_g:0,fat_g:3.6},
-  mushroom:{calories:22,protein_g:3.1,carbs_g:3.3,fat_g:0.3},
-  asparagus:{calories:20,protein_g:2.2,carbs_g:3.9,fat_g:0.1},
-  avocado:{calories:160,protein_g:2,carbs_g:9,fat_g:15,fiber_g:7}
+  egg: {
+    calories: 155,
+    protein_g: 13,
+    carbs_g: 1.1,
+    fat_g: 11.1,
+    fiber_g: 0,
+    sugars_g: 1.1,
+    sodium_mg: 124,
+    potassium_mg: 126,
+    calcium_mg: 50,
+    iron_mg: 1.2,
+    vitamin_d_iu: 87,
+  },
+  bacon: {
+    calories: 541,
+    protein_g: 37,
+    carbs_g: 1.4,
+    fat_g: 42,
+    sodium_mg: 1717,
+    potassium_mg: 565,
+    calcium_mg: 11,
+    iron_mg: 1.4,
+  },
+  ham: { calories: 145, protein_g: 20, carbs_g: 1.5, fat_g: 6.7, sodium_mg: 1200 },
+  charcuterie: { calories: 300, protein_g: 18, carbs_g: 2, fat_g: 24, sodium_mg: 1200 },
+  sobrasada: { calories: 459, protein_g: 11, carbs_g: 1.5, fat_g: 45, sodium_mg: 1400 },
+  bread: {
+    calories: 265,
+    protein_g: 9,
+    carbs_g: 49,
+    fat_g: 3.2,
+    fiber_g: 2.7,
+    sugars_g: 5,
+    sodium_mg: 491,
+    calcium_mg: 144,
+    iron_mg: 3.6,
+  },
+  rice: { calories: 130, protein_g: 2.4, carbs_g: 28, fat_g: 0.3, fiber_g: 0.4 },
+  cheese: { calories: 402, protein_g: 25, carbs_g: 1.3, fat_g: 33 },
+  ricotta: { calories: 174, protein_g: 11.3, carbs_g: 3, fat_g: 13 },
+  cottage: { calories: 98, protein_g: 11.1, carbs_g: 3.4, fat_g: 4.3 },
+  beef: { calories: 250, protein_g: 26, carbs_g: 0, fat_g: 17 },
+  chicken: { calories: 165, protein_g: 31, carbs_g: 0, fat_g: 3.6 },
+  mushroom: { calories: 22, protein_g: 3.1, carbs_g: 3.3, fat_g: 0.3 },
+  asparagus: { calories: 20, protein_g: 2.2, carbs_g: 3.9, fat_g: 0.1 },
+  avocado: { calories: 160, protein_g: 2, carbs_g: 9, fat_g: 15, fiber_g: 7 },
 };
 const MATCHES: Array<[RegExp, keyof typeof F]> = [
-  [/huevo|egg/i,"egg"], [/bacon|tocino/i,"bacon"], [/jam[oó]n|ham|prosciutto/i,"ham"],
-  [/charcuterie|embutid/i,"charcuterie"], [/sobras?ada|sobrassada|salami|chorizo/i,"sobrasada"],
-  [/ricotta/i,"ricotta"], [/cottage/i,"cottage"], [/queso|cheese/i,"cheese"],
-  [/pan|bread|biscuit/i,"bread"], [/arroz|rice/i,"rice"], [/res|beef|carne molida/i,"beef"],
-  [/pollo|chicken/i,"chicken"], [/champi|mushroom/i,"mushroom"], [/esp[aá]rrago|asparagus/i,"asparagus"],
-  [/aguacate|avocado/i,"avocado"]
+  [/huevo|egg/i, "egg"],
+  [/bacon|tocino/i, "bacon"],
+  [/jam[oó]n|ham|prosciutto/i, "ham"],
+  [/charcuterie|embutid/i, "charcuterie"],
+  [/sobras?ada|sobrassada|salami|chorizo/i, "sobrasada"],
+  [/ricotta/i, "ricotta"],
+  [/cottage/i, "cottage"],
+  [/queso|cheese/i, "cheese"],
+  [/pan|bread|biscuit/i, "bread"],
+  [/arroz|rice/i, "rice"],
+  [/res|beef|carne molida/i, "beef"],
+  [/pollo|chicken/i, "chicken"],
+  [/champi|mushroom/i, "mushroom"],
+  [/esp[aá]rrago|asparagus/i, "asparagus"],
+  [/aguacate|avocado/i, "avocado"],
 ];
 function mixFromPrimaryName(name: string): any | null {
   const hits: Nut[] = [];
@@ -398,7 +486,8 @@ function mixFromPrimaryName(name: string): any | null {
 // ---- IMPUTACIÓN de macros y micros si faltan ----
 function imputeFromPrior(base: any, prior: Nut, kcal?: number) {
   const out = { ...base };
-  const pk = 4 * (prior.protein_g ?? 0) + 4 * (prior.carbs_g ?? 0) + 9 * (prior.fat_g ?? 0);
+  const pk =
+    4 * (prior.protein_g ?? 0) + 4 * (prior.carbs_g ?? 0) + 9 * (prior.fat_g ?? 0);
   const s =
     isNum(kcal) && pk > 0 ? Math.max(0.6, Math.min(1.6, (kcal as number) / pk)) : 1;
 
@@ -431,7 +520,10 @@ function imputeMissing(base: any, primaryName: string, _conf: number, names: str
   if (!prior && names && names.length > 1) {
     for (const n of names.slice(0, 4)) {
       const p = mixFromPrimaryName(n);
-      if (p) { prior = p; break; }
+      if (p) {
+        prior = p;
+        break;
+      }
     }
   }
   if (prior) return imputeFromPrior(base, prior, base.calories);
@@ -447,91 +539,143 @@ function fillMissing(base: any, ref: any) {
 }
 function sanitize(base: any, ref: any | null) {
   let out = { ...base };
-  for (const k of ["protein_g","carbs_g","fat_g","fiber_g","sugars_g"])
+  for (const k of ["protein_g", "carbs_g", "fat_g", "fiber_g", "sugars_g"])
     if (isNum(out[k])) out[k] = Math.max(0, Math.min(100, out[k]));
-  if (isNum(out.sodium_mg))    out.sodium_mg    = Math.max(0, Math.min(3500, out.sodium_mg));
-  if (isNum(out.potassium_mg)) out.potassium_mg = Math.max(0, Math.min(2500, out.potassium_mg));
-  if (isNum(out.calcium_mg))   out.calcium_mg   = Math.max(0, Math.min(1500, out.calcium_mg));
-  if (isNum(out.iron_mg))      out.iron_mg      = Math.max(0, Math.min(30,   out.iron_mg));
+  if (isNum(out.sodium_mg)) out.sodium_mg = Math.max(0, Math.min(3500, out.sodium_mg));
+  if (isNum(out.potassium_mg))
+    out.potassium_mg = Math.max(0, Math.min(2500, out.potassium_mg));
+  if (isNum(out.calcium_mg))
+    out.calcium_mg = Math.max(0, Math.min(1500, out.calcium_mg));
+  if (isNum(out.iron_mg)) out.iron_mg = Math.max(0, Math.min(30, out.iron_mg));
 
-  const missingMacros = ["protein_g","carbs_g","fat_g"].some(k => !isNum(out[k]));
+  const missingMacros = ["protein_g", "carbs_g", "fat_g"].some((k) => !isNum(out[k]));
   const kcalWeird = !isNum(out.calories) || (isNum(out.calories) && out.calories > 420);
   if (ref && (missingMacros || kcalWeird)) out = fillMissing(out, ref);
 
-  if (["protein_g","carbs_g","fat_g"].every(k => isNum(out[k]))) {
-    const kcal = +(4*out.protein_g + 4*out.carbs_g + 9*out.fat_g).toFixed(1);
-    if (!isNum(out.calories) || out.calories > kcal*1.2 || out.calories < kcal*0.8)
-      out.calories = kcal;
+  // Recalcular SIEMPRE las kcal por Atwater cuando existan macros
+  if (["protein_g", "carbs_g", "fat_g"].every((k) => isNum(out[k]))) {
+    out.calories = +(
+      4 * out.protein_g +
+      4 * out.carbs_g +
+      9 * out.fat_g
+    ).toFixed(1);
+  } else {
+    // Si faltan macros y vienen kcal irreales por 100 g, ignóralas para que se imputen bien
+    if (isNum(out.calories) && out.calories > 450) out.calories = null;
   }
   return out;
 }
 
 // ---------------------- helpers de nombres ----------------------
-const dishesFrom = (o:any)=> Array.isArray(o?.recognition_results)?o.recognition_results :
-  Array.isArray(o?.dishes)?o.dishes : Array.isArray(o?.items)?o.items : [];
-function namesFromAll(dishes:any[], ingredients:any): string[] {
-  const names:string[]=[];
-  dishes.forEach((d:any)=>{ const n=(d?.name||d?.dish||"")+"";
+const dishesFrom = (o: any) =>
+  Array.isArray(o?.recognition_results)
+    ? o.recognition_results
+    : Array.isArray(o?.dishes)
+    ? o.dishes
+    : Array.isArray(o?.items)
+    ? o.items
+    : [];
+function namesFromAll(dishes: any[], ingredients: any): string[] {
+  const names: string[] = [];
+  dishes.forEach((d: any) => {
+    const n = (d?.name || d?.dish || "") + "";
     if (n.trim()) names.push(n.toLowerCase());
   });
-  const stack=[ingredients];
-  while(stack.length){
-    const v=stack.pop();
-    if (!v||typeof v!=="object") continue;
-    if (Array.isArray(v)) v.forEach(x=>stack.push(x));
+  const stack = [ingredients];
+  while (stack.length) {
+    const v = stack.pop();
+    if (!v || typeof v !== "object") continue;
+    if (Array.isArray(v)) v.forEach((x) => stack.push(x));
     else {
-      const label=(v.name||v.label||v.ingredient||v.title||"")+"";
-      if (label && label.length<60) names.push(label.toLowerCase());
+      const label = (v.name || v.label || v.ingredient || v.title || "") + "";
+      if (label && label.length < 60) names.push(label.toLowerCase());
       for (const k of Object.keys(v)) stack.push(v[k]);
     }
   }
-  return Array.from(new Set(names)).slice(0,50);
+  return Array.from(new Set(names)).slice(0, 50);
 }
 
 // ---------------------- handler ----------------------
-export default async function handler(req:any,res:any){
+export default async function handler(req: any, res: any) {
   cors(res);
-  if (req.method==="OPTIONS"){ res.status(200).end(); return; }
-  if (req.method!=="POST"){ res.status(405).json({error:"Method not allowed"}); return; }
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
 
   try {
-    const ct=(req.headers["content-type"]||"").toLowerCase();
-    let file:any=null, body:any=null;
-    if (ct.startsWith("application/json")){
-      const chunks:Buffer[]=[]; for await (const ch of req) chunks.push(ch as Buffer);
-      const raw=Buffer.concat(chunks).toString("utf8"); body=raw?JSON.parse(raw):{};
+    const ct = (req.headers["content-type"] || "").toLowerCase();
+    let file: any = null,
+      body: any = null;
+    if (ct.startsWith("application/json")) {
+      const chunks: Buffer[] = [];
+      for await (const ch of req) chunks.push(ch as Buffer);
+      const raw = Buffer.concat(chunks).toString("utf8");
+      body = raw ? JSON.parse(raw) : {};
     } else {
-      const mp=await parseMultipart(req); file=mp.file; body=mp.fields;
+      const mp = await parseMultipart(req);
+      file = mp.file;
+      body = mp.fields;
     }
 
-    let cacheKey=""; if (file?.buffer) cacheKey="BUF:"+fastHash(file.buffer); else if (body?.imageId) cacheKey="ID:"+String(body.imageId);
-    if (cacheKey){ const c=cacheGet(cacheKey); if(c){ res.status(200).json(c); return; } }
+    let cacheKey = "";
+    if (file?.buffer) cacheKey = "BUF:" + fastHash(file.buffer);
+    else if (body?.imageId) cacheKey = "ID:" + String(body.imageId);
+    if (cacheKey) {
+      const c = cacheGet(cacheKey);
+      if (c) {
+        res.status(200).json(c);
+        return;
+      }
+    }
 
     let imageId = body?.imageId || null;
-    let seg:any=null;
+    let seg: any = null;
 
-    if (file){
+    if (file) {
       file.buffer = await compressUnder1MB(file.buffer);
-      file.mime="image/jpeg"; file.filename="image.jpg";
+      file.mime = "image/jpeg";
+      file.filename = "image.jpg";
       seg = await postImage("/v2/image/segmentation/complete", file);
       imageId = seg?.imageId || seg?.image_id || seg?.id || imageId;
-    } else if (!imageId){ res.status(400).json({error:"Missing image or imageId"}); return; }
+    } else if (!imageId) {
+      res.status(400).json({ error: "Missing image or imageId" });
+      return;
+    }
 
     // reconocimiento de platos
     let dishes = dishesFrom(seg);
-    if (!dishes.length){
-      try { const r1=await postJSON("/v2/image/recognition/complete",{imageId}); dishes=dishesFrom(r1);} catch {}
-      if (!dishes.length && file){ try { const r2=await postImage("/v2/recognition/dish", file); dishes=dishesFrom(r2);} catch {} }
+    if (!dishes.length) {
+      try {
+        const r1 = await postJSON("/v2/image/recognition/complete", { imageId });
+        dishes = dishesFrom(r1);
+      } catch {}
+      if (!dishes.length && file) {
+        try {
+          const r2 = await postImage("/v2/recognition/dish", file);
+          dishes = dishesFrom(r2);
+        } catch {}
+      }
     }
 
     // ingredientes y nutrición
-    let ingredients:any=null;
-    try { ingredients=await postJSON("/v2/nutrition/recipe/ingredients",{imageId}); } catch {}
-    if (!ingredients && file){ try { ingredients=await postImage("/v2/nutrition/recipe/ingredients",file);} catch{} }
-
-    let nutrition:any=null;
+    let ingredients: any = null;
     try {
-      const payload=imageId?{imageId}:ingredients?{ingredients}:{};
+      ingredients = await postJSON("/v2/nutrition/recipe/ingredients", { imageId });
+    } catch {}
+    if (!ingredients && file) {
+      try {
+        ingredients = await postImage("/v2/nutrition/recipe/ingredients", file);
+      } catch {}
+    }
+
+    let nutrition: any = null;
+    try {
+      const payload = imageId ? { imageId } : ingredients ? { ingredients } : {};
       nutrition = await postJSON("/v2/nutrition/recipe/nutritionalInfo", payload);
       if (!nutrition) nutrition = await postJSON("/v2/recipe/nutritionalInfo", payload);
     } catch {}
@@ -557,26 +701,26 @@ export default async function handler(req:any,res:any){
     if (base) base = sanitize(base, refMix);
     if (!base && refMix) base = refMix;
 
-    if (!dishes.length) dishes=[{ name:"Dish", prob:null }];
+    if (!dishes.length) dishes = [{ name: "Dish", prob: null }];
 
     const out = {
       imageId,
-      candidates: dishes.map((d:any)=>({
+      candidates: dishes.map((d: any) => ({
         name: d?.name || d?.dish || "Dish",
         confidence: d?.prob || d?.score || null,
         base_per: "100g",
         base,
         provider: "logmeal",
-        raw: { dish:d, seg }
+        raw: { dish: d, seg },
       })),
       ingredients,
-      nutrition_raw: nutrition
+      nutrition_raw: nutrition,
     };
 
-    if (cacheKey) cacheSet(cacheKey,out);
+    if (cacheKey) cacheSet(cacheKey, out);
     res.status(200).json(out);
-  } catch (e:any){
+  } catch (e: any) {
     console.error("Proxy fatal error:", e);
-    res.status(500).json({ error:String(e?.message||e) });
+    res.status(500).json({ error: String(e?.message || e) });
   }
 }
