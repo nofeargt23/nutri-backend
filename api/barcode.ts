@@ -1,33 +1,56 @@
 // api/barcode.ts
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
+/**
+ * Responde 200 siempre.
+ * - found: true -> product con nutrimentos
+ * - found: false -> no encontrado (la app no debe tratarlo como error)
+ */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const code =
-      (req.method === "GET" ? (req.query.code as string) : (req.body as any)?.code)?.trim();
+    const codeParam =
+      req.method === "GET"
+        ? (req.query.code as string)
+        : (req.body as any)?.code;
+
+    const code = (codeParam || "").trim();
 
     if (!code) {
-      return res.status(400).json({ error: 'Missing "code"' });
+      return res.status(200).json({
+        found: false,
+        code: null,
+        error: 'missing_code',
+        message: 'Falta "code".'
+      });
     }
 
-    // OpenFoodFacts: no requiere API key
     const offUrl = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`;
     const r = await fetch(offUrl, { headers: { "User-Agent": "nutri-app/1.0" } });
 
     if (!r.ok) {
-      return res.status(r.status).json({ error: `Upstream ${r.status}` });
+      // Upstream caído / rate limit, etc. -> no rompemos la app
+      return res.status(200).json({
+        found: false,
+        code,
+        error: `upstream_${r.status}`,
+      });
     }
 
     const data = await r.json();
 
     if (data.status !== 1 || !data.product) {
-      return res.status(404).json({ error: "Not found" });
+      // No encontrado en OFF -> 200 con found:false
+      return res.status(200).json({
+        found: false,
+        code,
+        error: "not_found",
+      });
     }
 
     const p = data.product;
     const n = p.nutriments || {};
 
-    // nota: OFF reporta sodio en gramos -> lo convierto a mg
+    // OFF da sodio en gramos -> a mg
     const sodiumMg =
       n.sodium_100g != null
         ? Math.round(Number(n.sodium_100g) * 1000)
@@ -35,7 +58,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ? Math.round(Number(n.sodium_serving) * 1000)
         : null;
 
-    res.json({
+    return res.status(200).json({
+      found: true,
       source: "openfoodfacts",
       code,
       name: p.product_name || p.generic_name || "Producto",
@@ -53,6 +77,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       },
     });
   } catch (err: any) {
-    res.status(500).json({ error: err?.message || "server_error" });
+    // 200 con found:false para que la app no muestre "fallo"
+    return res.status(200).json({
+      found: false,
+      error: "server_error",
+      message: err?.message || "unexpected",
+    });
   }
 }
