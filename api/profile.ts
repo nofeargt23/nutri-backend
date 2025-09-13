@@ -1,57 +1,77 @@
-// api/profile.ts
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { sbAdmin, getUserFromReq } from './_lib/supabase';
+import { supabaseAdmin } from './_supabase';
 
-// Campos que permitimos escribir
-const ALLOWED = new Set([
-  'full_name', 'avatar_url',
-  'sex', 'height_cm', 'weight_kg',
-  'goal_calories', 'goal_protein_g', 'goal_carbs_g', 'goal_fat_g',
-  'language', 'units',
-]);
+function unauthorized(res: VercelResponse) {
+  return res.status(401).json({ ok: false, error: 'unauthorized' });
+}
+function bad(res: VercelResponse, error: string, details?: any, code = 400) {
+  return res.status(code).json({ ok: false, error, details });
+}
+function ok(res: VercelResponse, data: any = {}) {
+  return res.status(200).json({ ok: true, ...data });
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // Validar sesión de usuario (Bearer <token>)
-  const { user, error } = await getUserFromReq(req);
-  if (error || !user) return res.status(401).json({ error: 'unauthorized' });
-
   try {
-    if (req.method === 'GET') {
-      // Asumimos profiles.id = auth.uid()
-      const { data, error } = await sbAdmin
-        .from('profiles')
-        .select('*')
-        .eq('id', user.id)
-        .maybeSingle();
-
-      if (error) return res.status(500).json({ error: error.message });
-      return res.status(200).json({ profile: data || null });
+    // Autorización simple por header
+    const secret = req.headers['x-admin-secret'];
+    if (!secret || secret !== process.env.ADMIN_SECRET) {
+      return unauthorized(res);
     }
 
-    if (req.method === 'PUT') {
-      const body = (req.body || {}) as Record<string, any>;
-      const filtered: Record<string, any> = {};
-      for (const k of Object.keys(body)) if (ALLOWED.has(k)) filtered[k] = body[k];
+    if (req.method === 'GET') {
+      const user_id = String(req.query.user_id || '');
+      if (!/^[0-9a-f-]{36}$/i.test(user_id)) {
+        return bad(res, 'invalid user_id');
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('profiles')
+        .select('*')
+        .eq('user_id', user_id)
+        .maybeSingle(); // no revienta si no hay fila
+
+      if (error) {
+        return bad(res, 'db_select_failed', error.message, 500);
+      }
+      return ok(res, { profile: data ?? null });
+    }
+
+    if (req.method === 'POST') {
+      const b = (req.body ?? {}) as any;
+      if (!b.user_id) return bad(res, 'user_id required');
 
       const row = {
-        id: user.id,
-        ...filtered,
+        user_id: b.user_id,
+        full_name: b.full_name ?? null,
+        sex: b.sex ?? null,
+        height_cm: b.height_cm ?? null,
+        weight_kg: b.weight_kg ?? null,
+        units: b.units ?? 'metric',
+        goals: b.goals ?? null,
         updated_at: new Date().toISOString(),
       };
 
-      const { data, error } = await sbAdmin
+      const { data, error } = await supabaseAdmin
         .from('profiles')
-        .upsert(row, { onConflict: 'id' })
+        .upsert(row, { onConflict: 'user_id' })
         .select()
         .single();
 
-      if (error) return res.status(500).json({ error: error.message });
-      return res.status(200).json({ profile: data });
+      if (error) {
+        return bad(res, 'db_upsert_failed', error.message, 500);
+      }
+      return ok(res, { profile: data });
     }
 
-    res.setHeader('Allow', 'GET, PUT');
-    return res.status(405).json({ error: 'method_not_allowed' });
-  } catch (e: any) {
-    return res.status(500).json({ error: String(e?.message || e) });
+    res.setHeader('Allow', 'GET, POST');
+    return bad(res, 'method_not_allowed', null, 405);
+  } catch (err: any) {
+    console.error('profile handler crash', err);
+    return res.status(500).json({
+      ok: false,
+      error: 'server_crash',
+      details: String(err?.message || err),
+    });
   }
 }
