@@ -1,55 +1,89 @@
-// api/profile.ts (o api/profile/index.ts)
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { supabaseAdmin } from '../_supabase';
+// Vercel Serverless Function: /api/profile
+import { createClient } from '@supabase/supabase-js';
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  try {
-    const adminSecret = req.headers['x-admin-secret'];
-    if (adminSecret !== process.env.ADMIN_SECRET) {
-      return res.status(401).json({ ok: false, error: 'unauthorized' });
-    }
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || '';
+// acepta ambos nombres de variable para el service role
+const SERVICE_ROLE =
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SB_SERVICE_ROLE_KEY || '';
 
-    const user_id = (req.query.user_id as string) || '';
-    if (!user_id) {
-      return res.status(400).json({ ok: false, error: 'missing user_id' });
-    }
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'my-admin-xyz';
 
-    if (req.method === 'GET') {
-      // lee desde la vista o tabla que estés usando
-      const { data, error } = await supabaseAdmin
-        .from('profiles_ext') // si usas la vista con alias user_id
-        // .from('profiles')   // si prefieres la tabla base (usa id en vez de user_id)
-        .select('*')
-        .eq('user_id', user_id) // si es profiles_ext
-        // .eq('id', user_id)    // si es profiles
-        .maybeSingle();
+// util: validar uuid v4 simple
+const isUUID = (v: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 
-      if (error) return res.status(500).json({ ok: false, error: error.message });
-      return res.json({ ok: true, profile: data });
-    }
-
-    if (req.method === 'POST') {
-      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
-      const updates = {
-        id: user_id, // clave primaria en 'profiles'
-        full_name: body.full_name ?? null,
-        height_cm: body.height_cm ?? null,
-        updated_at: new Date().toISOString()
-      };
-
-      const { data, error } = await supabaseAdmin
-        .from('profiles')
-        .upsert(updates, { onConflict: 'id' })
-        .select()
-        .single();
-
-      if (error) return res.status(500).json({ ok: false, error: error.message });
-      return res.json({ ok: true, profile: data });
-    }
-
-    res.setHeader('Allow', ['GET', 'POST']);
-    return res.status(405).json({ ok: false, error: 'method_not_allowed' });
-  } catch (e: any) {
-    return res.status(500).json({ ok: false, error: String(e.message || e) });
+export default async function handler(req: any, res: any) {
+  // auth de admin para pruebas
+  if (req.headers['x-admin-secret'] !== ADMIN_SECRET) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
+
+  const user_id = String(req.query.user_id || '');
+  if (!isUUID(user_id)) {
+    return res.status(400).json({ ok: false, error: 'invalid user_id' });
+  }
+
+  if (!SUPABASE_URL || !SERVICE_ROLE) {
+    return res
+      .status(500)
+      .json({ ok: false, step: 'init', error: 'env_missing: SUPABASE_SERVICE_ROLE' });
+  }
+
+  const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+
+  if (req.method === 'GET') {
+    // leer por **id** (no user_id)
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user_id)
+      .single();
+
+    if (error && (error as any).code !== 'PGRST116') {
+      return res.status(500).json({ ok: false, step: 'select', error: error.message });
+    }
+    return res.status(200).json({ ok: true, profile: data || null });
+  }
+
+  if (req.method === 'POST') {
+    // parsear body y permitir solo columnas existentes
+    let body: any = {};
+    try {
+      body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch {
+      return res.status(400).json({ ok: false, error: 'invalid JSON body' });
+    }
+
+    const allow = [
+      'full_name',
+      'gender',
+      'birthdate',
+      'height_cm',
+      'weight_kg',
+      'goal_kcal',
+      'goal_protein_g',
+      'goal_carbs_g',
+      'goal_fat_g',
+      'avatar_url',
+    ];
+
+    const payload: any = { id: user_id }; // upsert por **id**
+    for (const k of allow) if (body[k] !== undefined) payload[k] = body[k];
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .upsert(payload)         // sin onConflict raro ni updated_at
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(500).json({ ok: false, step: 'upsert', error: error.message });
+    }
+    return res.status(200).json({ ok: true, profile: data });
+  }
+
+  return res.status(405).json({ ok: false, error: 'method_not_allowed' });
 }
