@@ -1,17 +1,15 @@
+// api/admin-ping.ts
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { supabaseAdmin } from './_supabase';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  try {
-    const { data, error } = await supabaseAdmin
-      .from('user_roles')
-      .select('user_id, role')
-      .limit(5);
-
-    if (error) return res.status(500).json({ ok: false, error: error.message });
-
-    return res.status(200).json({ ok: true, sample: data });
-  } catch (e: any) {
-    return res.status(500).json({ ok: false, error: e.message });
+  // Debes enviar este header: x-admin-secret: <tu valor>
+  const header = (req.headers['x-admin-secret'] || req.headers['X-Admin-Secret']) as string | undefined;
+  if (!header || header !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
+  return res.status(200).json({
+    ok: true,
+    env: 'up',
+    supabase: !!process.env.SUPABASE_URL,
+  });
 }
