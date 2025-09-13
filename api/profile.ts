@@ -1,74 +1,76 @@
-// /api/profile.ts
-// Handler mínimo sin tipos, robusto para Node runtime en Vercel
+// api/profile.ts  (o api/profile.js)
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SB_SERVICE_ROLE_KEY = process.env.SB_SERVICE_ROLE_KEY!; // usa aquí el nombre exacto de tu env en Vercel
-const ADMIN_SECRET = process.env.ADMIN_SECRET || 'my-admin-xyz';
-
-const supabase = createClient(SUPABASE_URL, SB_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false }
-});
-
-// util: parsea body seguro (a veces Vercel te lo da como string)
-function getJsonBody(req: any) {
-  if (!req.body) return {};
-  if (typeof req.body === 'string') {
-    try { return JSON.parse(req.body); } catch { return {}; }
-  }
-  return req.body;
-}
+const supabase = createClient(
+  process.env.SUPABASE_URL as string,
+  process.env.SUPABASE_SERVICE_ROLE as string
+);
 
 export default async function handler(req: any, res: any) {
-  try {
-    // auth simple de admin
-    const secret = req.headers['x-admin-secret'];
-    if (secret !== ADMIN_SECRET) {
-      res.status(401).json({ ok: false, error: 'unauthorized' });
-      return;
-    }
-
-    const user_id = (req.query?.user_id || '').toString();
-    if (!user_id) {
-      res.status(400).json({ ok: false, error: 'missing user_id' });
-      return;
-    }
-
-    if (req.method === 'GET') {
-      // lee perfil
-      const { data, error } = await supabase
-        .from('profiles')                 // <<< cambia si tu tabla se llama distinto
-        .select('*')
-        .eq('user_id', user_id)
-        .maybeSingle();
-      if (error) throw error;
-      res.status(200).json({ ok: true, profile: data });
-      return;
-    }
-
-    if (req.method === 'POST' || req.method === 'PUT') {
-      // upsert del perfil
-      const body = getJsonBody(req);
-      const payload = {
-        user_id,
-        ...body,
-        updated_at: new Date().toISOString(),
-      };
-
-      const { data, error } = await supabase
-        .from('profiles')                 // <<< cambia si tu tabla se llama distinto
-        .upsert(payload, { onConflict: 'user_id' })
-        .select()
-        .maybeSingle();
-      if (error) throw error;
-
-      res.status(200).json({ ok: true, profile: data });
-      return;
-    }
-
-    res.status(405).json({ ok: false, error: 'method not allowed' });
-  } catch (err: any) {
-    console.error('api/profile error', err);
-    res.status(500).json({ ok: false, error: err?.message || 'internal error' });
+  // auth simple con header
+  const admin = req.headers['x-admin-secret'];
+  if (admin !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
+
+  const user_id = String(req.query.user_id || '').trim();
+  if (!user_id) {
+    return res.status(400).json({ ok: false, error: 'missing user_id' });
+  }
+
+  if (req.method === 'GET') {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', user_id) // <- usar id, NO user_id
+      .single();
+
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.status(200).json({ ok: true, profile: data });
+  }
+
+  if (req.method === 'POST') {
+    let body: any = {};
+    try {
+      body =
+        typeof req.body === 'object' && req.body !== null
+          ? req.body
+          : JSON.parse(req.body || '{}');
+    } catch {
+      return res.status(400).json({ ok: false, error: 'invalid json' });
+    }
+
+    // Campos permitidos para actualizar
+    const allowed = [
+      'full_name',
+      'gender',
+      'birthdate',
+      'height_cm',
+      'weight_kg',
+      'goal_kcal',
+      'goal_protein_g',
+      'goal_carbs_g',
+      'goal_fat_g',
+      'avatar_url'
+    ];
+
+    // Construimos el payload SIN user_id (es generated always)
+    const payload: any = { id: user_id }; // <- clave es id
+    for (const k of allowed) {
+      if (k in body) payload[k] = body[k];
+    }
+
+    // opcional: llevar updated_at
+    payload.updated_at = new Date().toISOString();
+
+    const { error } = await supabase
+      .from('profiles')
+      .upsert(payload, { onConflict: 'id' });
+
+    if (error) return res.status(500).json({ ok: false, error: error.message });
+    return res.status(200).json({ ok: true, updated: 1 });
+  }
+
+  res.setHeader('Allow', 'GET, POST');
+  return res.status(405).json({ ok: false, error: 'method not allowed' });
 }
