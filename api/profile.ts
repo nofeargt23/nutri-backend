@@ -1,96 +1,55 @@
-// api/profile.ts  (si usas JS, quita los tipos :any y los "as string")
-import { createClient } from '@supabase/supabase-js';
+// api/profile.ts (o api/profile/index.ts)
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { supabaseAdmin } from '../_supabase';
 
-function getSupabase() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE;
-  if (!url) throw new Error('env_missing: SUPABASE_URL');
-  if (!key) throw new Error('env_missing: SUPABASE_SERVICE_ROLE');
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
-export default async function handler(req: any, res: any) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    // Auth muy simple por header
-    const admin = req.headers['x-admin-secret'];
-    if (admin !== process.env.ADMIN_SECRET) {
+    const adminSecret = req.headers['x-admin-secret'];
+    if (adminSecret !== process.env.ADMIN_SECRET) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
 
-    const user_id = String(req.query.user_id || '').trim();
+    const user_id = (req.query.user_id as string) || '';
     if (!user_id) {
       return res.status(400).json({ ok: false, error: 'missing user_id' });
     }
 
-    const supabase = getSupabase();
-
     if (req.method === 'GET') {
-      try {
-        const { data, error } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', user_id) // usar id, NO user_id
-          .single();
+      // lee desde la vista o tabla que estés usando
+      const { data, error } = await supabaseAdmin
+        .from('profiles_ext') // si usas la vista con alias user_id
+        // .from('profiles')   // si prefieres la tabla base (usa id en vez de user_id)
+        .select('*')
+        .eq('user_id', user_id) // si es profiles_ext
+        // .eq('id', user_id)    // si es profiles
+        .maybeSingle();
 
-        if (error) {
-          return res.status(500).json({ ok: false, step: 'select', error: error.message });
-        }
-        return res.status(200).json({ ok: true, profile: data });
-      } catch (e: any) {
-        return res.status(500).json({ ok: false, step: 'get_try', error: String(e?.message || e) });
-      }
+      if (error) return res.status(500).json({ ok: false, error: error.message });
+      return res.json({ ok: true, profile: data });
     }
 
     if (req.method === 'POST') {
-      let body: any = {};
-      try {
-        body =
-          typeof req.body === 'object' && req.body !== null
-            ? req.body
-            : JSON.parse(req.body || '{}');
-      } catch {
-        return res.status(400).json({ ok: false, error: 'invalid json' });
-      }
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body || {};
+      const updates = {
+        id: user_id, // clave primaria en 'profiles'
+        full_name: body.full_name ?? null,
+        height_cm: body.height_cm ?? null,
+        updated_at: new Date().toISOString()
+      };
 
-      // Campos permitidos para actualizar
-      const allowed = [
-        'full_name',
-        'gender',
-        'birthdate',
-        'height_cm',
-        'weight_kg',
-        'goal_kcal',
-        'goal_protein_g',
-        'goal_carbs_g',
-        'goal_fat_g',
-        'avatar_url',
-      ];
+      const { data, error } = await supabaseAdmin
+        .from('profiles')
+        .upsert(updates, { onConflict: 'id' })
+        .select()
+        .single();
 
-      const payload: any = { id: user_id }; // clave es id
-      for (const k of allowed) {
-        if (k in body) payload[k] = body[k];
-      }
-      // Si tienes la columna updated_at, la rellenamos; si no, no pasa nada
-      payload.updated_at = new Date().toISOString();
-
-      try {
-        const { error } = await supabase
-          .from('profiles')
-          .upsert(payload, { onConflict: 'id' });
-
-        if (error) {
-          return res.status(500).json({ ok: false, step: 'upsert', error: error.message });
-        }
-        return res.status(200).json({ ok: true, updated: 1 });
-      } catch (e: any) {
-        return res.status(500).json({ ok: false, step: 'post_try', error: String(e?.message || e) });
-      }
+      if (error) return res.status(500).json({ ok: false, error: error.message });
+      return res.json({ ok: true, profile: data });
     }
 
-    res.setHeader('Allow', 'GET, POST');
-    return res.status(405).json({ ok: false, error: 'method not allowed' });
+    res.setHeader('Allow', ['GET', 'POST']);
+    return res.status(405).json({ ok: false, error: 'method_not_allowed' });
   } catch (e: any) {
-    // Errores en inicialización (p.ej., env faltantes) o cualquier throw no capturado
-    return res.status(500).json({ ok: false, step: 'init', error: String(e?.message || e) });
+    return res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 }
