@@ -1,77 +1,67 @@
+// api/profile.ts
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { supabaseAdmin } from './_supabase';
+import { createClient } from '@supabase/supabase-js';
 
-function unauthorized(res: VercelResponse) {
-  return res.status(401).json({ ok: false, error: 'unauthorized' });
+function requireEnv(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
 }
-function bad(res: VercelResponse, error: string, details?: any, code = 400) {
-  return res.status(code).json({ ok: false, error, details });
-}
-function ok(res: VercelResponse, data: any = {}) {
-  return res.status(200).json({ ok: true, ...data });
-}
+
+const SUPABASE_URL = requireEnv('SUPABASE_URL');
+const SERVICE_KEY = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+const ADMIN_SECRET = requireEnv('ADMIN_SECRET');
+
+const supabase = createClient(SUPABASE_URL, SERVICE_KEY);
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  try {
-    // Autorización simple por header
-    const secret = req.headers['x-admin-secret'];
-    if (!secret || secret !== process.env.ADMIN_SECRET) {
-      return unauthorized(res);
-    }
+  // Seguridad simple por header
+  if (req.headers['x-admin-secret'] !== ADMIN_SECRET) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
 
+  try {
     if (req.method === 'GET') {
       const user_id = String(req.query.user_id || '');
-      if (!/^[0-9a-f-]{36}$/i.test(user_id)) {
-        return bad(res, 'invalid user_id');
-      }
+      if (!user_id) return res.status(400).json({ ok: false, error: 'missing user_id' });
 
-      const { data, error } = await supabaseAdmin
+      const { data, error } = await supabase
         .from('profiles')
         .select('*')
         .eq('user_id', user_id)
-        .maybeSingle(); // no revienta si no hay fila
+        .maybeSingle();
 
       if (error) {
-        return bad(res, 'db_select_failed', error.message, 500);
+        console.error('SUPABASE_SELECT', error);
+        return res.status(500).json({ ok: false, error: error.message });
       }
-      return ok(res, { profile: data ?? null });
+      if (!data) return res.status(404).json({ ok: false, error: 'not_found' });
+
+      return res.status(200).json({ ok: true, profile: data });
     }
 
     if (req.method === 'POST') {
-      const b = (req.body ?? {}) as any;
-      if (!b.user_id) return bad(res, 'user_id required');
+      const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+      const p = body?.profile;
+      if (!p?.user_id) return res.status(400).json({ ok: false, error: 'missing profile.user_id' });
 
-      const row = {
-        user_id: b.user_id,
-        full_name: b.full_name ?? null,
-        sex: b.sex ?? null,
-        height_cm: b.height_cm ?? null,
-        weight_kg: b.weight_kg ?? null,
-        units: b.units ?? 'metric',
-        goals: b.goals ?? null,
-        updated_at: new Date().toISOString(),
-      };
-
-      const { data, error } = await supabaseAdmin
+      // upsert por user_id
+      const { data, error } = await supabase
         .from('profiles')
-        .upsert(row, { onConflict: 'user_id' })
+        .upsert(p, { onConflict: 'user_id' })
         .select()
-        .single();
+        .maybeSingle();
 
       if (error) {
-        return bad(res, 'db_upsert_failed', error.message, 500);
+        console.error('SUPABASE_UPSERT', error);
+        return res.status(500).json({ ok: false, error: error.message });
       }
-      return ok(res, { profile: data });
+      return res.status(200).json({ ok: true, profile: data });
     }
 
-    res.setHeader('Allow', 'GET, POST');
-    return bad(res, 'method_not_allowed', null, 405);
+    return res.status(405).json({ ok: false, error: 'method_not_allowed' });
   } catch (err: any) {
-    console.error('profile handler crash', err);
-    return res.status(500).json({
-      ok: false,
-      error: 'server_crash',
-      details: String(err?.message || err),
-    });
+    console.error('PROFILE_HANDLER', err);
+    return res.status(500).json({ ok: false, error: err?.message || 'server_error' });
   }
 }
