@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
-export const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL as string,
-  process.env.SUPABASE_SERVICE_ROLE as string,
-  { auth: { persistSession: false } }
-);
+const url  = process.env.SUPABASE_URL!;
+const key  = process.env.SUPABASE_SERVICE_ROLE_KEY!; // SERVICE role, no el anon
+
+export const supabaseAdmin = createClient(url, key, {
+  auth: { persistSession: false },
+});
